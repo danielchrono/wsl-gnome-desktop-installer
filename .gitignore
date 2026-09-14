@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.log
+*.bak
+*-bak-*
+check_syntax*.ps1
