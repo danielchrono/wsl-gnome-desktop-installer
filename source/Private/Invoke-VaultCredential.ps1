@@ -29,3 +29,17 @@ function Test-WslRdpCredential([string]$LinuxUser, [string]$Uid) {
   $r = Invoke-Wsl $LinuxUser "$envPrefix grdctl status 2>/dev/null | grep -E 'Username:' | grep -qv '(empty)' && echo YES || echo NO"
   return ($r.Out.Trim() -eq "YES")
 }
+
+# Parser puro da sonda (fail-closed: so 'b false' prova destravado).
+function Test-UnlockedPropertyOutput([string]$Out) {
+  return ($Out -match 'b false')
+}
+
+# Sonda sem prompt: colecao 'default' destravada? Le a propriedade Locked via
+# busctl (retorna na hora, nunca abre prompt). Qualquer duvida = $false:
+# melhor falhar rapido com instrucao do que travar 60s no set-credentials.
+function Test-WslKeyringUnlocked([string]$LinuxUser, [string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  $r = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked 2>/dev/null"
+  return (Test-UnlockedPropertyOutput -Out $r.Out)
+}

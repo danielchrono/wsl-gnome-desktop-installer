@@ -118,6 +118,15 @@ Describe 'Resolve-UserMenuChoice' {
   }
 }
 
+Describe 'Test-UnlockedPropertyOutput' {
+  It 'so b false prova destravado (fail-closed)' {
+    (& (Get-Module UbuntuGui) { Test-UnlockedPropertyOutput -Out 'b false' }) | Should Be $true
+    (& (Get-Module UbuntuGui) { Test-UnlockedPropertyOutput -Out 'b true' }) | Should Be $false
+    (& (Get-Module UbuntuGui) { Test-UnlockedPropertyOutput -Out '' }) | Should Be $false
+    (& (Get-Module UbuntuGui) { Test-UnlockedPropertyOutput -Out 'Failed to get property: No such interface' }) | Should Be $false
+  }
+}
+
 Describe 'New-WslSessionEnv' {
   It 'monta XDG e bus da sessao' {
     (& (Get-Module UbuntuGui) { New-WslSessionEnv -Uid '1000' }) | Should Be 'XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus'

@@ -389,6 +389,12 @@ if ($unlock.Code -ne 0) {
   Fail "Cofre nao desbloqueou com a senha informada ($($unlock.Out.Trim())) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
   throw "Cofre bloqueado"
 }
+# Sonda sem prompt antes de gravar: trancado = set-credentials travaria ate o
+# timeout. Puxa o retorno agora (segundos) em vez de esperar o estouro de 60s.
+if (-not (Test-WslKeyringUnlocked -LinuxUser $LinuxUser -Uid $Uid)) {
+  Fail "Cofre segue trancado apos o unlock (sem prompt p/ abrir: gravacao travaria) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+  throw "Cofre bloqueado"
+}
 
 # Credencial + TLS + servico (com retry, sem prompt: cofre ja existe destravado).
 # O set-credentials pode levar ate ~60s por tentativa: avisa + mostra tentativa p/ nao parecer travado.

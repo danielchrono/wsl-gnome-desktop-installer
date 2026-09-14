@@ -138,6 +138,20 @@ function Test-WslRdpCredential([string]$LinuxUser, [string]$Uid) {
   $r = Invoke-Wsl $LinuxUser "$envPrefix grdctl status 2>/dev/null | grep -E 'Username:' | grep -qv '(empty)' && echo YES || echo NO"
   return ($r.Out.Trim() -eq "YES")
 }
+
+# Parser puro da sonda (fail-closed: so 'b false' prova destravado).
+function Test-UnlockedPropertyOutput([string]$Out) {
+  return ($Out -match 'b false')
+}
+
+# Sonda sem prompt: colecao 'default' destravada? Le a propriedade Locked via
+# busctl (retorna na hora, nunca abre prompt). Qualquer duvida = $false:
+# melhor falhar rapido com instrucao do que travar 60s no set-credentials.
+function Test-WslKeyringUnlocked([string]$LinuxUser, [string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  $r = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked 2>/dev/null"
+  return (Test-UnlockedPropertyOutput -Out $r.Out)
+}
 # Escapa a senha para embutir em 'bash -c "..."' (escapa bash + PowerShell).
 function Get-PasswordQuote([string]$Password) {
   return ($Password -replace "'", "'\''") -replace '`', '``' -replace '\$', '`$' -replace '"', '`"'
@@ -837,6 +851,12 @@ Write-Host "  Desbloqueando o cofre..." -ForegroundColor Yellow
 $unlock = Unlock-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
 if ($unlock.Code -ne 0) {
   Fail "Cofre nao desbloqueou com a senha informada ($($unlock.Out.Trim())) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+  throw "Cofre bloqueado"
+}
+# Sonda sem prompt antes de gravar: trancado = set-credentials travaria ate o
+# timeout. Puxa o retorno agora (segundos) em vez de esperar o estouro de 60s.
+if (-not (Test-WslKeyringUnlocked -LinuxUser $LinuxUser -Uid $Uid)) {
+  Fail "Cofre segue trancado apos o unlock (sem prompt p/ abrir: gravacao travaria) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
   throw "Cofre bloqueado"
 }
 
