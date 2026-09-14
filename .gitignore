@@ -4,3 +4,4 @@ __pycache__/
 *.bak
 *-bak-*
 check_syntax*.ps1
+output/

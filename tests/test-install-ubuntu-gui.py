@@ -1,14 +1,17 @@
-"""Regressao do instalador de arquivo unico (acompanha Install-UbuntuGUI.ps1).
+"""Regressao do instalador de arquivo unico (acompanha src/*.ps1 via build).
 Cobre os defeitos ja encontrados uma vez: auto-colisao do marcador,
 escapes dobrados no cabecalho e quebra de linha final.
-Uso:  python3 tests/test-install-ubuntu-gui.py   (a partir da raiz do repo)
+Uso:  python3 tools/build_single.py && python3 tests/test-install-ubuntu-gui.py
 """
 import io
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, 'Install-UbuntuGUI.ps1')
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+import build_single
+
 DST = os.path.join(ROOT, 'Install_Gnome-Desktop.cmd')
 BS = chr(92)
 LF = chr(10)
@@ -23,7 +26,7 @@ def check(name, cond):
         fails.append(name)
 
 
-src = io.open(SRC, encoding='utf-8', newline='').read()
+src = build_single.build_body()
 dst = io.open(DST, encoding='utf-8', newline='').read()
 
 parts = dst.split(':::PS1-BODY-START')
@@ -34,7 +37,8 @@ head = parts[0]
 check('sem barra dupla no cabecalho', (BS + BS) not in head)
 check('cauda sem aspas frageis', 'Trim() + [char]10' in head)
 if len(sub) == 2:
-    check('extracao identica ao .ps1', sub[0].strip(WS) + LF == src.strip(WS) + LF)
+    check('extracao identica ao build', sub[0].strip(WS) + LF == src.strip(WS) + LF)
+check('cmd em dia com o build (nao editar a mao)', build_single.build_cmd() == dst)
 
 check('rdp auto-login (DPAPI+blob)', 'ProtectedData' in src and 'password 51:b:' in src)
 check('rewrite de IP no launcher', 'full address:s:' in src and 'Set-Content' in src)
@@ -46,7 +50,9 @@ check('porta fora da 3389 (evita 0x708 no loopback)', '= 3390' in src and '= 338
 check('grdctl fixa a porta', 'grdctl rdp set-port' in src and '$RDP_PORT' in src)
 check('sem grep hardcoded :3389', "grep -q ':3389'" not in src)
 check('verificacao usa a variavel de porta', '"RDP ouvindo :3389"' not in src)
-check('credencial avisa a demora', '60s por tentativa' in src and 'Tentativa $i/2' in src)
+check('credencial avisa a demora', 'CredTimeoutSec' in src and 'por tentativa' in src)
+check('retry da credencial centralizado', 'CredRetries' in src and 'Tentativa $i/' in src)
+check('tunables em UbuntuGui-Constants', 'UbuntuGuiDefaults' in src and 'MinBuildMirrored' in src and 'TlsCertDays' in src)
 check('tls/restart mostra progresso', 'Aplicando TLS/porta' in src)
 check('credencial verificada no daemon (nao so cofre)', 'grdctl status' in src and '(empty)' in src)
 check('view-only desativado', 'disable-view-only' in src)
@@ -72,5 +78,22 @@ check('reboot com conta regressiva', 'shutdown /r' in src and 'shutdown /a' in s
 check('tenta sem reboot antes', 'sem reboot - seguindo sozinho' in src)
 check('limpa retomada no sucesso', 'Clear-ResumeState' in src)
 check('versao 0.1.0', 'SCRIPT_VERSION' in src and '"0.1.0"' in src)
+tracked = []
+for dp, _, fns in os.walk(ROOT):
+    if 'output' in dp.split(os.sep):
+        continue
+    for fn in fns:
+        if fn.endswith(('.ps1', '.py', '.psd1', '.md', '.cmdpart', '.cmd')):
+            tracked.append(os.path.join(dp, fn))
+local_paths = [p for p in tracked
+               if os.path.basename(p) != 'test-install-ubuntu-gui.py'
+               and re.search(r'/home/|/mnt/c/Users|wsl\.localhost|C:\\Users\\|C:/Users/', io.open(p, encoding='utf-8', newline='').read())]
+check('sem caminhos absolutos locais (build portatil)', not local_paths)
+psd1 = io.open(os.path.join(ROOT, 'source', 'UbuntuGui.psd1'), encoding='utf-8').read()
+mver = re.search(r"ModuleVersion\s*=\s*'([^']+)'", psd1)
+check('manifesto declara 0.1.0', mver and mver.group(1) == '0.1.0')
+check('versoes psd1 e script iguais', mver and ('"%s"' % mver.group(1)) in src)
+check('modulo exporta as duas funcoes', 'Install-WslUbuntuGui' in psd1 and 'Get-WslUbuntuGuiStatus' in psd1)
+check('funcoes Public no build', 'function Install-WslUbuntuGui' in src and 'function Get-WslUbuntuGuiStatus' in src)
 
 sys.exit(1 if fails else 0)
