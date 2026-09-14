@@ -108,6 +108,22 @@ Describe 'Resolve-NetworkChoice' {
   }
 }
 
+Describe 'Resolve-UserMenuChoice' {
+  It 'indice 0 usa o capturado mesmo com digitado' {
+    (& (Get-Module UbuntuGui) { Resolve-UserMenuChoice -MenuIndex 0 -TypedName 'outro' -DefaultUser 'salvo' }) | Should Be 'salvo'
+  }
+  It 'novo com nome usa o digitado; vazio volta ao padrao' {
+    (& (Get-Module UbuntuGui) { Resolve-UserMenuChoice -MenuIndex 1 -TypedName 'novo1' -DefaultUser 'salvo' }) | Should Be 'novo1'
+    (& (Get-Module UbuntuGui) { Resolve-UserMenuChoice -MenuIndex 1 -TypedName '   ' -DefaultUser 'salvo' }) | Should Be 'salvo'
+  }
+}
+
+Describe 'New-WslSessionEnv' {
+  It 'monta XDG e bus da sessao' {
+    (& (Get-Module UbuntuGui) { New-WslSessionEnv -Uid '1000' }) | Should Be 'XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus'
+  }
+}
+
 Describe 'Get-DefaultLinuxUser' {
   It 'prefere o salvo entre runs' {
     (& (Get-Module UbuntuGui) { Get-DefaultLinuxUser -SavedUser '  salvo  ' -WindowsUser 'Daniel' }) | Should Be 'salvo'

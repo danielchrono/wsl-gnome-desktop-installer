@@ -16,13 +16,14 @@ $RDP_PORT = $RdpPort
 $D = $script:UbuntuGuiDefaults
 $shell = (Invoke-Wsl $LinuxUser "systemctl --user is-active $($D.ShellService)").Out.Trim()
 $rdp = Invoke-Wsl $LinuxUser "systemctl --user is-active $($D.RdpService) && ss -tlnp 2>/dev/null | grep -q ':$RDP_PORT' && echo OK || echo DOWN"
-$cred = (Invoke-Wsl $LinuxUser "grdctl status 2>/dev/null | grep -E 'Username:' | grep -qv '(empty)' && echo YES || echo NO").Out.Trim()
+$Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
+$credSet = Test-WslRdpCredential -LinuxUser $LinuxUser -Uid $Uid
 return [pscustomobject]@{
   Distro           = $Distro
   LinuxUser        = $LinuxUser
   RdpPort          = $RdpPort
   ShellActive      = ($shell -eq 'active')
   RdpListening     = ($rdp.Out -match 'OK')
-  CredentialsSet   = ($cred -eq 'YES')
+  CredentialsSet   = $credSet
 }
 }

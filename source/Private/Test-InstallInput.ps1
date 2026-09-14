@@ -36,3 +36,13 @@ function Get-DefaultLinuxUser {
   if ([string]::IsNullOrWhiteSpace($defUser)) { $defUser = "ubuntu" }
   return $defUser
 }
+
+# Escolha usar-capturado vs criar-novo (menu TUI, indice 0 = usar). Pura: vazia
+# volta ao padrao; digitado vai como esta (validacao vem depois, sem mudanca).
+function Resolve-UserMenuChoice {
+  [CmdletBinding()]
+  param([int]$MenuIndex, [string]$TypedName, [string]$DefaultUser)
+  if ($MenuIndex -ne 1) { return $DefaultUser }
+  if ([string]::IsNullOrWhiteSpace($TypedName)) { return $DefaultUser }
+  return $TypedName
+}

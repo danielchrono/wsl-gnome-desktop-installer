@@ -137,10 +137,15 @@ if (-not $Resume) {
     $savedRaw = if (Test-Path $SavedUserFile) { (Get-Content $SavedUserFile -Raw) } else { '' }
     $defUser = Get-DefaultLinuxUser -SavedUser $savedRaw -WindowsUser $env:USERNAME
     if (Test-TuiAvailable -NoTui:$NoTui) {
-      Write-Host "  Usuario Linux [$defUser]" -ForegroundColor Cyan
+      $userIdx = Show-SingleChoiceMenu -Title "Usuario Linux" `
+        -Options @("Usar '$defUser'", 'Criar um novo') `
+        -DefaultIndex 0 -NoTui:$NoTui
+      $typedUser = if ($userIdx -eq 1) { Read-Host "Novo usuario Linux" } else { '' }
+      $LinuxUser = Resolve-UserMenuChoice -MenuIndex $userIdx -TypedName $typedUser -DefaultUser $defUser
+    } else {
+      $LinuxUser = Read-Host "Usuario Linux [$defUser]"
+      if ([string]::IsNullOrWhiteSpace($LinuxUser)) { $LinuxUser = $defUser }
     }
-    $LinuxUser = Read-Host "Usuario Linux [$defUser]"
-    if ([string]::IsNullOrWhiteSpace($LinuxUser)) { $LinuxUser = $defUser }
   }
   $userCheck = Test-LinuxUserName -Name $LinuxUser
   if (-not $userCheck.Ok -and $userCheck.Reason -eq 'reserved') {
@@ -174,7 +179,7 @@ if (-not $Resume) {
   if ([string]::IsNullOrWhiteSpace($NetChoice)) {
     if (Test-TuiAvailable -NoTui:$NoTui) {
       $menuIdx = Show-SingleChoiceMenu -Title "Modo de rede" `
-        -Options @('[1] localhost fixo 127.0.0.1 (recomendado)', '[2] IP dinamico a cada clique') `
+        -Options @('localhost fixo 127.0.0.1 (recomendado)', 'IP dinamico a cada clique') `
         -DefaultIndex 0 -NoTui:$NoTui
       $NetChoice = if ($menuIdx -eq 1) { "2" } else { "1" }
     } else {
@@ -375,10 +380,15 @@ if ((Invoke-Wsl $LinuxUser "grep -c pam_gnome_keyring $PamSudoPath 2>/dev/null")
 Ok "/etc/pam.d/sudo intacto"
 
 # Rerun apos reboot: o cofre volta bloqueado e o set-credentials travaria no prompt.
-# Desbloqueia com a senha informada (cofre de senha vazia ignora: ja abre sozinho).
+# Gestor de cofre (Invoke-VaultCredential.ps1): unlock falhou = fail fast com
+# instrucao, nunca 2x60s de retry queimado a toa (sintoma: tentativas mudas).
 $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
 Write-Host "  Desbloqueando o cofre..." -ForegroundColor Yellow
-Invoke-Wsl $LinuxUser "printf '%s' '$PWQ' | XDG_RUNTIME_DIR=/run/user/$Uid gnome-keyring-daemon --unlock 2>&1 | tail -n 1" | Out-Null
+$unlock = Unlock-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+if ($unlock.Code -ne 0) {
+  Fail "Cofre nao desbloqueou com a senha informada ($($unlock.Out.Trim())) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+  throw "Cofre bloqueado"
+}
 
 # Credencial + TLS + servico (com retry, sem prompt: cofre ja existe destravado).
 # O set-credentials pode levar ate ~60s por tentativa: avisa + mostra tentativa p/ nao parecer travado.
@@ -387,14 +397,17 @@ $stored = $false
 for ($i = 1; $i -le $CredRetries -and -not $stored; $i++) {
   Write-Host "  Tentativa $i/$CredRetries..." -NoNewline
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  $gc = Invoke-Wsl $LinuxUser "timeout $CredTimeoutSec grdctl rdp set-credentials '$LinuxUser' '$PWQ' 2>&1 | tail -n 5"
+  $gc = Set-WslRdpCredential -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid -TimeoutSec $CredTimeoutSec
   # Verifica a credencial de verdade no daemon (o cofre existir nao basta: item vazio tambem conta no busctl)
-  $stored = ((Invoke-Wsl $LinuxUser "grdctl status 2>/dev/null | grep -E 'Username:' | grep -qv '(empty)' && echo YES || echo NO").Out.Trim() -eq "YES")
+  $stored = Test-WslRdpCredential -LinuxUser $LinuxUser -Uid $Uid
   $sw.Stop()
   if ($stored) { Write-Host " ok ($([int]$sw.Elapsed.TotalSeconds)s)" -ForegroundColor Green }
   else { Write-Host " ainda nao ($([int]$sw.Elapsed.TotalSeconds)s): $($gc.Out.Trim())" -ForegroundColor Yellow }
 }
-if (-not $stored) { Fail "Credencial RDP nao gravou no cofre"; throw "Credencial nao gravada" }
+if (-not $stored) {
+  Fail "Credencial RDP nao gravou no cofre (ultima saida: $($gc.Out.Trim()) - cofre trancado com outra senha? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo)"
+  throw "Credencial nao gravada"
+}
 Ok "Credencial RDP gravada"
 # Porta fora da 3389 (erro 0x708 no loopback): idempotente, migra quem instalou na 3389.
 Write-Host "  Aplicando TLS/porta $RDP_PORT e reiniciando o servico..." -ForegroundColor Yellow

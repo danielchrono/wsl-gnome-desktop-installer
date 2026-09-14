@@ -107,6 +107,37 @@ function Invoke-WslRoot {
   if ($PSBoundParameters.ContainsKey('Distro')) { return Invoke-Wsl "root" $Command -Distro $Distro }
   return Invoke-Wsl "root" $Command
 }
+# Gestor de cofre (credencial RDP no Secret Service via gnome-keyring/grdctl).
+# Todo acesso ao cofre passa por aqui: elimina a duplicacao entre Install
+# (etapa 5) e Get-WslUbuntuGuiStatus e nunca engole resultado (sem Out-Null
+# cego). I/O com o daemon fica isolado nestas fronteiras; retry e mensagens
+# ficam na View. Cobertura Pester no construtor puro.
+function New-WslSessionEnv([string]$Uid) {
+  return "XDG_RUNTIME_DIR=/run/user/$Uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$Uid/bus"
+}
+
+# Desbloqueia o cofre 'login' com a senha informada. Retorna @{ Code; Out }.
+# Code != 0 = senha nao confere ou daemon fora: o chamador falha rapido com
+# instrucao (nunca retry cego que queima 2x60s). PIPESTATUS[1] e o exit do
+# unlock (sem ele, o tail mascarava tudo com 0).
+function Unlock-WslKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  return Invoke-Wsl $LinuxUser "printf '%s' '$PasswordQuote' | $envPrefix gnome-keyring-daemon --unlock 2>&1 | tail -n 3; exit `${PIPESTATUS[1]}"
+}
+
+# Grava usuario+senha do RDP no cofre. 'env' e obrigatorio apos 'timeout'
+# (timeout executa o 1o argumento como programa: prefixo VAR=x puro falharia).
+function Set-WslRdpCredential([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid, [int]$TimeoutSec) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  return Invoke-Wsl $LinuxUser "timeout $TimeoutSec env $envPrefix grdctl rdp set-credentials '$LinuxUser' '$PasswordQuote' 2>&1 | tail -n 5"
+}
+
+# Verifica de verdade no daemon (o cofre existir nao basta: item vazio tambem conta).
+function Test-WslRdpCredential([string]$LinuxUser, [string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  $r = Invoke-Wsl $LinuxUser "$envPrefix grdctl status 2>/dev/null | grep -E 'Username:' | grep -qv '(empty)' && echo YES || echo NO"
+  return ($r.Out.Trim() -eq "YES")
+}
 # Escapa a senha para embutir em 'bash -c "..."' (escapa bash + PowerShell).
 function Get-PasswordQuote([string]$Password) {
   return ($Password -replace "'", "'\''") -replace '`', '``' -replace '\$', '`$' -replace '"', '`"'
@@ -156,6 +187,16 @@ function Get-DefaultLinuxUser {
   $defUser = if ($WindowsUser) { ($WindowsUser.ToLower() -replace '[^a-z0-9]', '') } else { '' }
   if ([string]::IsNullOrWhiteSpace($defUser)) { $defUser = "ubuntu" }
   return $defUser
+}
+
+# Escolha usar-capturado vs criar-novo (menu TUI, indice 0 = usar). Pura: vazia
+# volta ao padrao; digitado vai como esta (validacao vem depois, sem mudanca).
+function Resolve-UserMenuChoice {
+  [CmdletBinding()]
+  param([int]$MenuIndex, [string]$TypedName, [string]$DefaultUser)
+  if ($MenuIndex -ne 1) { return $DefaultUser }
+  if ([string]::IsNullOrWhiteSpace($TypedName)) { return $DefaultUser }
+  return $TypedName
 }
 # View TUI nativa (MVVM): so render + leitura de tecla, sem decisao de instalacao.
 # Zero dependencia (Windows PowerShell 5.1 inbox). Com fallback Read-Host quando
@@ -546,10 +587,15 @@ if (-not $Resume) {
     $savedRaw = if (Test-Path $SavedUserFile) { (Get-Content $SavedUserFile -Raw) } else { '' }
     $defUser = Get-DefaultLinuxUser -SavedUser $savedRaw -WindowsUser $env:USERNAME
     if (Test-TuiAvailable -NoTui:$NoTui) {
-      Write-Host "  Usuario Linux [$defUser]" -ForegroundColor Cyan
+      $userIdx = Show-SingleChoiceMenu -Title "Usuario Linux" `
+        -Options @("Usar '$defUser'", 'Criar um novo') `
+        -DefaultIndex 0 -NoTui:$NoTui
+      $typedUser = if ($userIdx -eq 1) { Read-Host "Novo usuario Linux" } else { '' }
+      $LinuxUser = Resolve-UserMenuChoice -MenuIndex $userIdx -TypedName $typedUser -DefaultUser $defUser
+    } else {
+      $LinuxUser = Read-Host "Usuario Linux [$defUser]"
+      if ([string]::IsNullOrWhiteSpace($LinuxUser)) { $LinuxUser = $defUser }
     }
-    $LinuxUser = Read-Host "Usuario Linux [$defUser]"
-    if ([string]::IsNullOrWhiteSpace($LinuxUser)) { $LinuxUser = $defUser }
   }
   $userCheck = Test-LinuxUserName -Name $LinuxUser
   if (-not $userCheck.Ok -and $userCheck.Reason -eq 'reserved') {
@@ -583,7 +629,7 @@ if (-not $Resume) {
   if ([string]::IsNullOrWhiteSpace($NetChoice)) {
     if (Test-TuiAvailable -NoTui:$NoTui) {
       $menuIdx = Show-SingleChoiceMenu -Title "Modo de rede" `
-        -Options @('[1] localhost fixo 127.0.0.1 (recomendado)', '[2] IP dinamico a cada clique') `
+        -Options @('localhost fixo 127.0.0.1 (recomendado)', 'IP dinamico a cada clique') `
         -DefaultIndex 0 -NoTui:$NoTui
       $NetChoice = if ($menuIdx -eq 1) { "2" } else { "1" }
     } else {
@@ -784,10 +830,15 @@ if ((Invoke-Wsl $LinuxUser "grep -c pam_gnome_keyring $PamSudoPath 2>/dev/null")
 Ok "/etc/pam.d/sudo intacto"
 
 # Rerun apos reboot: o cofre volta bloqueado e o set-credentials travaria no prompt.
-# Desbloqueia com a senha informada (cofre de senha vazia ignora: ja abre sozinho).
+# Gestor de cofre (Invoke-VaultCredential.ps1): unlock falhou = fail fast com
+# instrucao, nunca 2x60s de retry queimado a toa (sintoma: tentativas mudas).
 $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
 Write-Host "  Desbloqueando o cofre..." -ForegroundColor Yellow
-Invoke-Wsl $LinuxUser "printf '%s' '$PWQ' | XDG_RUNTIME_DIR=/run/user/$Uid gnome-keyring-daemon --unlock 2>&1 | tail -n 1" | Out-Null
+$unlock = Unlock-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+if ($unlock.Code -ne 0) {
+  Fail "Cofre nao desbloqueou com a senha informada ($($unlock.Out.Trim())) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+  throw "Cofre bloqueado"
+}
 
 # Credencial + TLS + servico (com retry, sem prompt: cofre ja existe destravado).
 # O set-credentials pode levar ate ~60s por tentativa: avisa + mostra tentativa p/ nao parecer travado.
@@ -796,14 +847,17 @@ $stored = $false
 for ($i = 1; $i -le $CredRetries -and -not $stored; $i++) {
   Write-Host "  Tentativa $i/$CredRetries..." -NoNewline
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  $gc = Invoke-Wsl $LinuxUser "timeout $CredTimeoutSec grdctl rdp set-credentials '$LinuxUser' '$PWQ' 2>&1 | tail -n 5"
+  $gc = Set-WslRdpCredential -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid -TimeoutSec $CredTimeoutSec
   # Verifica a credencial de verdade no daemon (o cofre existir nao basta: item vazio tambem conta no busctl)
-  $stored = ((Invoke-Wsl $LinuxUser "grdctl status 2>/dev/null | grep -E 'Username:' | grep -qv '(empty)' && echo YES || echo NO").Out.Trim() -eq "YES")
+  $stored = Test-WslRdpCredential -LinuxUser $LinuxUser -Uid $Uid
   $sw.Stop()
   if ($stored) { Write-Host " ok ($([int]$sw.Elapsed.TotalSeconds)s)" -ForegroundColor Green }
   else { Write-Host " ainda nao ($([int]$sw.Elapsed.TotalSeconds)s): $($gc.Out.Trim())" -ForegroundColor Yellow }
 }
-if (-not $stored) { Fail "Credencial RDP nao gravou no cofre"; throw "Credencial nao gravada" }
+if (-not $stored) {
+  Fail "Credencial RDP nao gravou no cofre (ultima saida: $($gc.Out.Trim()) - cofre trancado com outra senha? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo)"
+  throw "Credencial nao gravada"
+}
 Ok "Credencial RDP gravada"
 # Porta fora da 3389 (erro 0x708 no loopback): idempotente, migra quem instalou na 3389.
 Write-Host "  Aplicando TLS/porta $RDP_PORT e reiniciando o servico..." -ForegroundColor Yellow
@@ -938,14 +992,15 @@ $RDP_PORT = $RdpPort
 $D = $script:UbuntuGuiDefaults
 $shell = (Invoke-Wsl $LinuxUser "systemctl --user is-active $($D.ShellService)").Out.Trim()
 $rdp = Invoke-Wsl $LinuxUser "systemctl --user is-active $($D.RdpService) && ss -tlnp 2>/dev/null | grep -q ':$RDP_PORT' && echo OK || echo DOWN"
-$cred = (Invoke-Wsl $LinuxUser "grdctl status 2>/dev/null | grep -E 'Username:' | grep -qv '(empty)' && echo YES || echo NO").Out.Trim()
+$Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
+$credSet = Test-WslRdpCredential -LinuxUser $LinuxUser -Uid $Uid
 return [pscustomobject]@{
   Distro           = $Distro
   LinuxUser        = $LinuxUser
   RdpPort          = $RdpPort
   ShellActive      = ($shell -eq 'active')
   RdpListening     = ($rdp.Out -match 'OK')
-  CredentialsSet   = ($cred -eq 'YES')
+  CredentialsSet   = $credSet
 }
 }
 try {

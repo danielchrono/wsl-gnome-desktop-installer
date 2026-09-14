@@ -22,6 +22,7 @@ FUNC_FILES = [
     os.path.join('Private', 'UbuntuGui-Constants.ps1'),
     os.path.join('Private', 'Write-Feedback.ps1'),
     os.path.join('Private', 'Invoke-WslCommand.ps1'),
+    os.path.join('Private', 'Invoke-VaultCredential.ps1'),
     os.path.join('Private', 'Get-PasswordQuote.ps1'),
     os.path.join('Private', 'ConvertFrom-WslDistroList.ps1'),
     os.path.join('Private', 'Get-FirstIpAddress.ps1'),
