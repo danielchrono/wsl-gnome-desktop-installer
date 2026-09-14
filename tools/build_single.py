@@ -25,6 +25,8 @@ FUNC_FILES = [
     os.path.join('Private', 'Get-PasswordQuote.ps1'),
     os.path.join('Private', 'ConvertFrom-WslDistroList.ps1'),
     os.path.join('Private', 'Get-FirstIpAddress.ps1'),
+    os.path.join('Private', 'Test-InstallInput.ps1'),
+    os.path.join('Private', 'Show-TuiMenu.ps1'),
     os.path.join('Private', 'New-RdpFileContent.ps1'),
     os.path.join('Private', 'New-LauncherContent.ps1'),
     os.path.join('Private', 'Save-ResumeState.ps1'),

@@ -29,8 +29,8 @@ acessível via RDP (atalho no Desktop e no Iniciar, login automático).
 | Arquivo | Papel |
 |---|---|
 | `Install_Gnome-Desktop.cmd` | Entregável: extrai o PowerShell embutido e executa (**gerado — não editar**) |
-| `source/Public/` | `Install-WslUbuntuGui` (instalador), `Get-WslUbuntuGuiStatus` (leitura) |
-| `source/Private/` | Helpers (RDP, launcher, cofre, WSL, feedback) + `UbuntuGui-Constants.ps1` (todos os tunables: portas, timeouts, retries, paths) |
+| `source/Public/` | `Install-WslUbuntuGui` (instalador, `-NoTui` p/ automação), `Get-WslUbuntuGuiStatus` (leitura) |
+| `source/Private/` | Helpers (RDP, launcher, cofre, WSL, feedback) + `UbuntuGui-Constants.ps1` (tunables) + `Test-InstallInput.ps1` (validação pura) + `Show-TuiMenu.ps1` (TUI setas+Enter, sem dependências) |
 | `source/UbuntuGui.psd1` | Manifesto do módulo (versão, exports) |
 | `tools/build_single.py` | Build: `python3 tools/build_single.py` regenera o `.cmd` |
 | `tests/test-install-ubuntu-gui.py` | Regressão: `python3 tests/test-install-ubuntu-gui.py` |
@@ -40,9 +40,14 @@ acessível via RDP (atalho no Desktop e no Iniciar, login automático).
 
 ```powershell
 Import-Module ./source/UbuntuGui.psd1
-Install-WslUbuntuGui                        # interativo
+Install-WslUbuntuGui                        # interativo (TUI com fallback texto)
+Install-WslUbuntuGui -NoTui                 # sem TUI (automação)
 Get-WslUbuntuGuiStatus -LinuxUser daniel | Format-List   # somente leitura
 ```
+
+Organização: Model (`UbuntuGui-Constants.ps1`, via `Get-UbuntuGuiDefaults`),
+View (`Write-Feedback.ps1`, `Show-TuiMenu.ps1` — só render/input),
+ViewModel (`Test-InstallInput.ps1` puro + `Install-WslUbuntuGui` orquestrando).
 
 Artefatos: `output/UbuntuGui/` (gerado, formato PSGallery — publicar com
 `Publish-Module` quando houver API key). Para contribuir: edite `source/`,

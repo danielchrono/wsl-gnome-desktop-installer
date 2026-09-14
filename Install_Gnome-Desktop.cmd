@@ -46,22 +46,67 @@ $script:UbuntuGuiDefaults = @{
   PamSudoPath          = '/etc/pam.d/sudo'
   IconSizes            = @(16, 32, 48, 128, 256)
 }
-# Feedback padrao do instalador. $script:Failures acumula falhas nao-fatais;
-# Install-WslUbuntuGui zera no inicio e avalia no final (etapa 7).
+
+# Model (MVVM): acesso somente-leitura aos defaults. Retorna clone raso para o
+# chamador nao mutar a fonte unica (FP: sem estado compartilhado mutavel).
+function Get-UbuntuGuiDefaults {
+  [CmdletBinding()]
+  param()
+  $clone = @{}
+  foreach ($k in $script:UbuntuGuiDefaults.Keys) { $clone[$k] = $script:UbuntuGuiDefaults[$k] }
+  return $clone
+}
+# View (MVVM): so render no console, sem decisao. O estado de falhas vive no
+# ViewModel (Install-WslUbuntuGui, variavel local); $script:Failures segue como
+# compat legada espelhada para codigo externo que ainda le o global.
 $script:Failures = @()
-function Step($msg)  { Write-Host "`n==> $msg" -ForegroundColor Cyan }
-function Ok($msg)    { Write-Host "  [OK] $msg" -ForegroundColor Green }
-function Warn($msg)  { Write-Host "  [AVISO] $msg" -ForegroundColor Yellow }
-function Fail($msg)  { Write-Host "  [FALHA] $msg" -ForegroundColor Red; $script:Failures += $msg }
-# Roda 'wsl -d $DISTRO ...' repassando o exit code real do Linux.
-# NOTA: $DISTRO vem do escopo chamador (Install-WslUbuntuGui / Get-WslUbuntuGuiStatus
-# definem como local; o escopo dinamico do PowerShell alcanca ambos os modos:
-# modulo importado e .cmd concatenado). Proposital para nao churnar ~30 chamadas.
-function Invoke-Wsl([string]$AsUser, [string]$Command) {
-  $out = wsl -d $DISTRO -u $AsUser --exec bash -c $Command 2>&1
+function Step([string]$msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+function Ok([string]$msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
+function Warn([string]$msg) { Write-Host "  [AVISO] $msg" -ForegroundColor Yellow }
+function Fail([string]$msg) { Write-Host "  [FALHA] $msg" -ForegroundColor Red; $script:Failures += $msg }
+
+# Estado explicito (FP): hashtable imutavel por copia. Novo codigo prefere estas.
+function New-UbuntuGuiFeedbackState {
+  [CmdletBinding()]
+  param()
+  return @{ Failures = @() }
+}
+function Add-UbuntuGuiFailure {
+  [CmdletBinding()]
+  param([hashtable]$State, [string]$Message)
+  $base = @()
+  if ($State -and $State.Failures) { $base = @($State.Failures) }
+  return @{ Failures = @($base + $Message) }
+}
+function Get-UbuntuGuiFailures {
+  [CmdletBinding()]
+  param([hashtable]$State)
+  if ($State -and $State.ContainsKey('Failures')) { return @($State.Failures) }
+  return @($script:Failures)
+}
+# Roda 'wsl -d <distro> ...' repassando o exit code real do Linux.
+# ViewModel passa -Distro explicito (FP: sem dinamico). Chamadas antigas com 2 args
+# seguem funcionando via fallback: variavel $DISTRO do chamador > defaults > 'Ubuntu'.
+function Invoke-Wsl {
+  [CmdletBinding()]
+  param([string]$AsUser, [string]$Command, [string]$Distro)
+  $TargetDistro = $Distro
+  if ([string]::IsNullOrWhiteSpace($TargetDistro)) {
+    try { $TargetDistro = $DISTRO } catch { $TargetDistro = $null }
+  }
+  if ([string]::IsNullOrWhiteSpace($TargetDistro) -and $script:UbuntuGuiDefaults) {
+    $TargetDistro = $script:UbuntuGuiDefaults.Distro
+  }
+  if ([string]::IsNullOrWhiteSpace($TargetDistro)) { $TargetDistro = 'Ubuntu' }
+  $out = wsl -d $TargetDistro -u $AsUser --exec bash -c $Command 2>&1
   return @{ Code = $LASTEXITCODE; Out = ($out -join "`n") }
 }
-function Invoke-WslRoot([string]$Command) { return Invoke-Wsl "root" $Command }
+function Invoke-WslRoot {
+  [CmdletBinding()]
+  param([string]$Command, [string]$Distro)
+  if ($PSBoundParameters.ContainsKey('Distro')) { return Invoke-Wsl "root" $Command -Distro $Distro }
+  return Invoke-Wsl "root" $Command
+}
 # Escapa a senha para embutir em 'bash -c "..."' (escapa bash + PowerShell).
 function Get-PasswordQuote([string]$Password) {
   return ($Password -replace "'", "'\''") -replace '`', '``' -replace '\$', '`$' -replace '"', '`"'
@@ -73,6 +118,192 @@ function ConvertFrom-WslDistroList([string[]]$Raw) {
 # Primeiro IP de 'hostname -I' (pode vir com varios + espacos).
 function Get-FirstIpAddress([string]$HostnameI) {
   return ($HostnameI -split '\s+' | Where-Object { $_ } | Select-Object -First 1)
+}
+# ViewModel puro (MVVM): validacao sem I/O, sem global, sem WSL.
+# Todas retornam dados, nunca escrevem na tela nem lancam para fluxo normal
+# (o orquestrador Install-WslUbuntuGui decide mensagem/throw). Cobertas no Pester.
+function Test-LinuxUserName {
+  [CmdletBinding()]
+  param([string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Name)) {
+    return @{ Ok = $false; Reason = 'empty' }
+  }
+  if ($Name -eq 'root') {
+    return @{ Ok = $false; Reason = 'reserved' }
+  }
+  if ($Name -cnotmatch '^[a-z_][a-z0-9_-]*$') {
+    return @{ Ok = $false; Reason = 'pattern' }
+  }
+  return @{ Ok = $true; Reason = '' }
+}
+
+# Normaliza a escolha de rede do prompt/TUI ('1' = localhost mirrored, '2' = dinamico).
+# Preserva a regra historica: vazio ou qualquer coisa != '2' vira mirrored.
+function Resolve-NetworkChoice {
+  [CmdletBinding()]
+  param([string]$NetChoice)
+  $norm = if ([string]::IsNullOrWhiteSpace($NetChoice)) { '1' } else { $NetChoice.Trim() }
+  if ([string]::IsNullOrWhiteSpace($norm)) { $norm = '1' }
+  return @{ Normalized = $norm; WantMirrored = ($norm -ne "2") }
+}
+
+# Default do usuario Linux: salvo entre runs > windows user sanitizado > 'ubuntu'. Puro.
+function Get-DefaultLinuxUser {
+  [CmdletBinding()]
+  param([string]$SavedUser, [string]$WindowsUser)
+  $saved = if ($SavedUser) { $SavedUser.Trim() } else { '' }
+  if (-not [string]::IsNullOrWhiteSpace($saved)) { return $saved }
+  $defUser = if ($WindowsUser) { ($WindowsUser.ToLower() -replace '[^a-z0-9]', '') } else { '' }
+  if ([string]::IsNullOrWhiteSpace($defUser)) { $defUser = "ubuntu" }
+  return $defUser
+}
+# View TUI nativa (MVVM): so render + leitura de tecla, sem decisao de instalacao.
+# Zero dependencia (Windows PowerShell 5.1 inbox). Com fallback Read-Host quando
+# nao ha console interativo (pipe, -NoTui, hosts sem UI). Logica de indice pura
+# em Move-MenuIndex para cobrir no Pester sem precisar de teclado.
+function Move-MenuIndex {
+  [CmdletBinding()]
+  param(
+    [int]$Current,
+    [int]$Direction,
+    [int]$Count
+  )
+  if ($Count -le 0) { return 0 }
+  $next = $Current + $Direction
+  if ($next -lt 0) { return 0 }
+  if ($next -ge $Count) { return ($Count - 1) }
+  return $next
+}
+
+function Test-TuiAvailable {
+  [CmdletBinding()]
+  param([switch]$NoTui)
+  if ($NoTui) { return $false }
+  try {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ([Console]::IsInputRedirected) { return $false }
+  } catch { return $false }
+  if ($Host.Name -notmatch 'ConsoleHost') { return $false }
+  return $true
+}
+
+# Menu de escolha unica com setas + Enter. Retorna o indice 0-based selecionado.
+# Fallback: prompt numerico via Read-Host (mesmo contrato de retorno).
+function Show-SingleChoiceMenu {
+  [CmdletBinding()]
+  param(
+    [string]$Title,
+    [string[]]$Options,
+    [int]$DefaultIndex = 0,
+    [switch]$NoTui
+  )
+  if (-not $Options -or $Options.Count -eq 0) { return 0 }
+  $selected = $DefaultIndex
+  if ($selected -lt 0) { $selected = 0 }
+  if ($selected -ge $Options.Count) { $selected = $Options.Count - 1 }
+  if (-not (Test-TuiAvailable -NoTui:$NoTui)) {
+    for ($i = 0; $i -lt $Options.Count; $i++) {
+      Write-Host ("  [{0}] {1}" -f ($i + 1), $Options[$i])
+    }
+    $raw = Read-Host ("{0} [{1}]" -f $Title, ($selected + 1))
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $selected }
+    $n = 0
+    if ([int]::TryParse($raw.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $Options.Count) {
+      return ($n - 1)
+    }
+    return $selected
+  }
+  try {
+    [Console]::CursorVisible = $false
+  } catch {}
+  try {
+    $done = $false
+    while (-not $done) {
+      Write-Host ""
+      Write-Host ("  {0}" -f $Title) -ForegroundColor Cyan
+      for ($i = 0; $i -lt $Options.Count; $i++) {
+        if ($i -eq $selected) {
+          Write-Host ("  > [{0}] {1}" -f ($i + 1), $Options[$i]) -ForegroundColor Green
+        } else {
+          Write-Host ("    [{0}] {1}" -f ($i + 1), $Options[$i])
+        }
+      }
+      Write-Host "  (setas + Enter)" -ForegroundColor DarkGray
+      $key = [Console]::ReadKey($true)
+      switch ($key.Key) {
+        'UpArrow' { $selected = Move-MenuIndex -Current $selected -Direction -1 -Count $Options.Count }
+        'DownArrow' { $selected = Move-MenuIndex -Current $selected -Direction 1 -Count $Options.Count }
+        'Enter' { $done = $true }
+        'Escape' { $done = $true }
+        default {
+          $digit = "$($key.KeyChar)"
+          $n = 0
+          if ([int]::TryParse($digit, [ref]$n) -and $n -ge 1 -and $n -le $Options.Count) {
+            $selected = $n - 1
+            $done = $true
+          }
+        }
+      }
+      if (-not $done) {
+        # Reposiciona sem reler o cursor no Unix: la, CursorTop expoe DSR via
+        # stdin e rouba bytes das setas/Enter digitados junto (race). Win32 usa
+        # API de console real (sem DSR, sem race); Unix limpa a tela (sem flicker
+        # relevante num menu de 2-3 linhas) com fallback so-anexa.
+        $moved = $false
+        if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+          try {
+            $top = [Console]::CursorTop - ($Options.Count + 3)
+            if ($top -lt 0) { $top = 0 }
+            [Console]::SetCursorPosition(0, $top)
+            $moved = $true
+          } catch {}
+        }
+        if (-not $moved) {
+          try { Clear-Host } catch {}
+        }
+      }
+    }
+  } finally {
+    try {
+      [Console]::CursorVisible = $true
+    } catch {}
+    Write-Host ""
+  }
+  return $selected
+}
+
+# Leitura de senha com eco de asteriscos. Retorna SecureString como Read-Host -AsSecureString.
+function Read-TuiSecurePassword {
+  [CmdletBinding()]
+  param([string]$Prompt = "Senha", [switch]$NoTui)
+  if (-not (Test-TuiAvailable -NoTui:$NoTui)) {
+    return (Read-Host $Prompt -AsSecureString)
+  }
+  $secure = New-Object Security.SecureString
+  Write-Host ("{0}: " -f $Prompt) -NoNewline
+  $done = $false
+  while (-not $done) {
+    $key = [Console]::ReadKey($true)
+    switch ($key.Key) {
+      'Enter' { $done = $true }
+      'Backspace' {
+        if ($secure.Length -gt 0) {
+          $secure.RemoveAt($secure.Length - 1)
+          try { [Console]::Write("`b `b") } catch {}
+        }
+      }
+      'Escape' { $secure.Clear(); $done = $true }
+      default {
+        if ($key.KeyChar -and -not [char]::IsControl($key.KeyChar)) {
+          $secure.AppendChar($key.KeyChar)
+          try { [Console]::Write("*") } catch {}
+        }
+      }
+    }
+  }
+  Write-Host ""
+  $secure.MakeReadOnly()
+  return $secure
 }
 # Monta as linhas do .rdp com login automatico (senha em blob DPAPI, so este usuario le).
 function New-RdpFileContent(
@@ -205,18 +436,20 @@ param(
   [string]$GuiPackage,
   [string]$FallbackResolution,
   [int]$RdpPort,
-  [string]$AppName
+  [string]$AppName,
+  [switch]$NoTui
 )
-# (padroes em source/Private/UbuntuGui-Constants.ps1 - sem defaults aqui)
+# (padroes em source/Private/UbuntuGui-Constants.ps1 - sem defaults aqui; ViewModel)
 
 $script:Failures = @()
+$FeedbackState = New-UbuntuGuiFeedbackState
 $SCRIPT_VERSION = if ($SCRIPT_VERSION) { $SCRIPT_VERSION } else {
   try { (Import-PowerShellDataFile (Join-Path $PSScriptRoot '..\UbuntuGui.psd1')).ModuleVersion }
   catch { 'dev' }
 }
 
-# --- constantes (fonte unica: $script:UbuntuGuiDefaults; override via params) ---
-$D = $script:UbuntuGuiDefaults
+# --- constantes (Model via Get-UbuntuGuiDefaults: clone; override via params) ---
+$D = Get-UbuntuGuiDefaults
 foreach ($n in @('Distro', 'GuiPackage', 'FallbackResolution', 'RdpPort', 'AppName')) {
   if (-not $PSBoundParameters.ContainsKey($n)) { Set-Variable $n $D[$n] }
 }
@@ -310,26 +543,30 @@ if (-not $Resume) {
   # (nao precisa digitar no instalador do Ubuntu); nos reruns ele ja vem pronto.
   $SavedUserFile = Join-Path $env:LOCALAPPDATA "Programs\$APP_NAME\linux-user.txt"
   if ([string]::IsNullOrWhiteSpace($LinuxUser)) {
-    $defUser = if (Test-Path $SavedUserFile) { (Get-Content $SavedUserFile -Raw).Trim() } else { ($env:USERNAME.ToLower() -replace '[^a-z0-9]', '') }
-    if ([string]::IsNullOrWhiteSpace($defUser)) { $defUser = "ubuntu" }
+    $savedRaw = if (Test-Path $SavedUserFile) { (Get-Content $SavedUserFile -Raw) } else { '' }
+    $defUser = Get-DefaultLinuxUser -SavedUser $savedRaw -WindowsUser $env:USERNAME
+    if (Test-TuiAvailable -NoTui:$NoTui) {
+      Write-Host "  Usuario Linux [$defUser]" -ForegroundColor Cyan
+    }
     $LinuxUser = Read-Host "Usuario Linux [$defUser]"
     if ([string]::IsNullOrWhiteSpace($LinuxUser)) { $LinuxUser = $defUser }
   }
-  if ($LinuxUser -notmatch '^[a-z_][a-z0-9_-]*$') {
-    Fail "Usuario '$LinuxUser' invalido (use minusculas, numeros, _ ou -)"; throw "Usuario Linux invalido"
-  }
-  if ($LinuxUser -eq 'root') {
+  $userCheck = Test-LinuxUserName -Name $LinuxUser
+  if (-not $userCheck.Ok -and $userCheck.Reason -eq 'reserved') {
     Fail "O usuario 'root' e reservado - escolha outro nome"; throw "Usuario reservado"
   }
+  if (-not $userCheck.Ok) {
+    Fail "Usuario '$LinuxUser' invalido (use minusculas, numeros, _ ou -)"; throw "Usuario Linux invalido"
+  }
   if ($LinuxPassword) {
-    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringUni(
       [Runtime.InteropServices.Marshal]::SecureStringToBSTR($LinuxPassword))
   } else {
-    $sec1 = Read-Host "Senha do usuario $LinuxUser" -AsSecureString
-    $sec2 = Read-Host "Confirme a senha" -AsSecureString
-    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
+    $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
+    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringUni(
       [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec1))
-    $LinuxPass2 = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    $LinuxPass2 = [Runtime.InteropServices.Marshal]::PtrToStringUni(
       [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec2))
     if ($LinuxPass -cne $LinuxPass2 -or [string]::IsNullOrEmpty($LinuxPass)) {
       Fail "Senhas diferentes ou vazias - rode de novo"; throw "Senhas diferentes ou vazias"
@@ -342,11 +579,20 @@ if (-not $Resume) {
   # Modo de rede: [1] localhost fixo 127.0.0.1 via mirrored (recomendado, padrao: endpoint
   # estavel, sem redescoberta, assinatura do .rdp sempre valida) ou [2] IP dinamico
   # descoberto automaticamente a cada clique (p/ Windows sem mirrored).
+  # View (TUI com fallback Read-Host); regra pura em Resolve-NetworkChoice.
   if ([string]::IsNullOrWhiteSpace($NetChoice)) {
-    $NetChoice = Read-Host "Modo de rede [1] localhost fixo 127.0.0.1 (recomendado) ou [2] IP dinamico a cada clique [1]"
-    if ([string]::IsNullOrWhiteSpace($NetChoice)) { $NetChoice = "1" }
+    if (Test-TuiAvailable -NoTui:$NoTui) {
+      $menuIdx = Show-SingleChoiceMenu -Title "Modo de rede" `
+        -Options @('[1] localhost fixo 127.0.0.1 (recomendado)', '[2] IP dinamico a cada clique') `
+        -DefaultIndex 0 -NoTui:$NoTui
+      $NetChoice = if ($menuIdx -eq 1) { "2" } else { "1" }
+    } else {
+      $NetChoice = Read-Host "Modo de rede [1] localhost fixo 127.0.0.1 (recomendado) ou [2] IP dinamico a cada clique [1]"
+    }
   }
-  $WantMirrored = ($NetChoice.Trim() -ne "2")
+  $NetResolved = Resolve-NetworkChoice -NetChoice $NetChoice
+  $NetChoice = $NetResolved.Normalized
+  $WantMirrored = $NetResolved.WantMirrored
   if ($WantMirrored) { Ok "Modo: localhost fixo 127.0.0.1 (masked)" }
   else { Write-Host "  Modo: IP dinamico - o atalho identifica o IP automaticamente a cada clique" -ForegroundColor Yellow }
 
@@ -654,7 +900,9 @@ if (Test-Path $RdpPath) { Ok "Login automatico pronto (abre direto, sem senha)" 
 else { Fail "Arquivo .rdp sumiu"; throw "RDP sumiu" }
 
 Write-Host ""
-if ($script:Failures.Count -eq 0) {
+$FeedbackState = @{ Failures = @($script:Failures) }
+$LiveFailures = @(Get-UbuntuGuiFailures -State $FeedbackState)
+if ($LiveFailures.Count -eq 0) {
   Remove-Item $LogFile -Force -ErrorAction SilentlyContinue  # higiene: transcript guarda a senha
   Clear-ResumeState $RunOncePath $RunOnceName $ResumeFile $ResumePs1  # higiene: estado de retomada guarda a senha (DPAPI)
   $ip = Get-FirstIpAddress (wsl -d $DISTRO -- hostname -I 2>$null)

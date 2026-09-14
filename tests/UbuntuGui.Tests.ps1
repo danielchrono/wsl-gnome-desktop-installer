@@ -84,3 +84,65 @@ Describe 'New-LauncherContent' {
     $c | Should Match 'daniel'
   }
 }
+
+Describe 'Test-LinuxUserName' {
+  It 'aceita nome valido' {
+    (& (Get-Module UbuntuGui) { (Test-LinuxUserName -Name 'daniel').Ok }) | Should Be $true
+  }
+  It 'rejeita root como reservado' {
+    (& (Get-Module UbuntuGui) { (Test-LinuxUserName -Name 'root').Reason }) | Should Be 'reserved'
+  }
+  It 'rejeita maiusculas e vazio' {
+    (& (Get-Module UbuntuGui) { (Test-LinuxUserName -Name 'Daniel').Ok }) | Should Be $false
+    (& (Get-Module UbuntuGui) { (Test-LinuxUserName -Name '').Ok }) | Should Be $false
+  }
+}
+
+Describe 'Resolve-NetworkChoice' {
+  It 'vazio vira mirrored padrao' {
+    (& (Get-Module UbuntuGui) { (Resolve-NetworkChoice -NetChoice '').WantMirrored }) | Should Be $true
+    (& (Get-Module UbuntuGui) { (Resolve-NetworkChoice -NetChoice $null).Normalized }) | Should Be '1'
+  }
+  It '2 vira dinamico' {
+    (& (Get-Module UbuntuGui) { (Resolve-NetworkChoice -NetChoice '2').WantMirrored }) | Should Be $false
+  }
+}
+
+Describe 'Get-DefaultLinuxUser' {
+  It 'prefere o salvo entre runs' {
+    (& (Get-Module UbuntuGui) { Get-DefaultLinuxUser -SavedUser '  salvo  ' -WindowsUser 'Daniel' }) | Should Be 'salvo'
+  }
+  It 'sanitiza o usuario Windows e cai para ubuntu' {
+    (& (Get-Module UbuntuGui) { Get-DefaultLinuxUser -SavedUser '' -WindowsUser 'Daniel-1' }) | Should Be 'daniel1'
+    (& (Get-Module UbuntuGui) { Get-DefaultLinuxUser -SavedUser '' -WindowsUser '---' }) | Should Be 'ubuntu'
+  }
+}
+
+Describe 'Move-MenuIndex' {
+  It 'trava nas bordas' {
+    (& (Get-Module UbuntuGui) { Move-MenuIndex -Current 0 -Direction -1 -Count 2 }) | Should Be 0
+    (& (Get-Module UbuntuGui) { Move-MenuIndex -Current 1 -Direction 1 -Count 2 }) | Should Be 1
+  }
+  It 'anda no meio' {
+    (& (Get-Module UbuntuGui) { Move-MenuIndex -Current 0 -Direction 1 -Count 2 }) | Should Be 1
+  }
+}
+
+Describe 'FeedbackState' {
+  It 'acumula por copia sem mutar o original' {
+    (& (Get-Module UbuntuGui) {
+      $s0 = New-UbuntuGuiFeedbackState
+      $s1 = Add-UbuntuGuiFailure -State $s0 -Message 'a'
+      if ((Get-UbuntuGuiFailures -State $s0).Count -eq 0) { (Get-UbuntuGuiFailures -State $s1) -join ',' } else { 'MUTOU' }
+    }) | Should Be 'a'
+  }
+}
+
+Describe 'Get-UbuntuGuiDefaults' {
+  It 'retorna clone (mutar nao afeta a fonte)' {
+    (& (Get-Module UbuntuGui) {
+      $a = Get-UbuntuGuiDefaults; $a.RdpPort = 1
+      (Get-UbuntuGuiDefaults).RdpPort
+    }) | Should Be 3390
+  }
+}

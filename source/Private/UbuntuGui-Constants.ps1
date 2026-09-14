@@ -32,3 +32,13 @@ $script:UbuntuGuiDefaults = @{
   PamSudoPath          = '/etc/pam.d/sudo'
   IconSizes            = @(16, 32, 48, 128, 256)
 }
+
+# Model (MVVM): acesso somente-leitura aos defaults. Retorna clone raso para o
+# chamador nao mutar a fonte unica (FP: sem estado compartilhado mutavel).
+function Get-UbuntuGuiDefaults {
+  [CmdletBinding()]
+  param()
+  $clone = @{}
+  foreach ($k in $script:UbuntuGuiDefaults.Keys) { $clone[$k] = $script:UbuntuGuiDefaults[$k] }
+  return $clone
+}

@@ -27,18 +27,20 @@ param(
   [string]$GuiPackage,
   [string]$FallbackResolution,
   [int]$RdpPort,
-  [string]$AppName
+  [string]$AppName,
+  [switch]$NoTui
 )
-# (padroes em source/Private/UbuntuGui-Constants.ps1 - sem defaults aqui)
+# (padroes em source/Private/UbuntuGui-Constants.ps1 - sem defaults aqui; ViewModel)
 
 $script:Failures = @()
+$FeedbackState = New-UbuntuGuiFeedbackState
 $SCRIPT_VERSION = if ($SCRIPT_VERSION) { $SCRIPT_VERSION } else {
   try { (Import-PowerShellDataFile (Join-Path $PSScriptRoot '..\UbuntuGui.psd1')).ModuleVersion }
   catch { 'dev' }
 }
 
-# --- constantes (fonte unica: $script:UbuntuGuiDefaults; override via params) ---
-$D = $script:UbuntuGuiDefaults
+# --- constantes (Model via Get-UbuntuGuiDefaults: clone; override via params) ---
+$D = Get-UbuntuGuiDefaults
 foreach ($n in @('Distro', 'GuiPackage', 'FallbackResolution', 'RdpPort', 'AppName')) {
   if (-not $PSBoundParameters.ContainsKey($n)) { Set-Variable $n $D[$n] }
 }
@@ -132,26 +134,30 @@ if (-not $Resume) {
   # (nao precisa digitar no instalador do Ubuntu); nos reruns ele ja vem pronto.
   $SavedUserFile = Join-Path $env:LOCALAPPDATA "Programs\$APP_NAME\linux-user.txt"
   if ([string]::IsNullOrWhiteSpace($LinuxUser)) {
-    $defUser = if (Test-Path $SavedUserFile) { (Get-Content $SavedUserFile -Raw).Trim() } else { ($env:USERNAME.ToLower() -replace '[^a-z0-9]', '') }
-    if ([string]::IsNullOrWhiteSpace($defUser)) { $defUser = "ubuntu" }
+    $savedRaw = if (Test-Path $SavedUserFile) { (Get-Content $SavedUserFile -Raw) } else { '' }
+    $defUser = Get-DefaultLinuxUser -SavedUser $savedRaw -WindowsUser $env:USERNAME
+    if (Test-TuiAvailable -NoTui:$NoTui) {
+      Write-Host "  Usuario Linux [$defUser]" -ForegroundColor Cyan
+    }
     $LinuxUser = Read-Host "Usuario Linux [$defUser]"
     if ([string]::IsNullOrWhiteSpace($LinuxUser)) { $LinuxUser = $defUser }
   }
-  if ($LinuxUser -notmatch '^[a-z_][a-z0-9_-]*$') {
-    Fail "Usuario '$LinuxUser' invalido (use minusculas, numeros, _ ou -)"; throw "Usuario Linux invalido"
-  }
-  if ($LinuxUser -eq 'root') {
+  $userCheck = Test-LinuxUserName -Name $LinuxUser
+  if (-not $userCheck.Ok -and $userCheck.Reason -eq 'reserved') {
     Fail "O usuario 'root' e reservado - escolha outro nome"; throw "Usuario reservado"
   }
+  if (-not $userCheck.Ok) {
+    Fail "Usuario '$LinuxUser' invalido (use minusculas, numeros, _ ou -)"; throw "Usuario Linux invalido"
+  }
   if ($LinuxPassword) {
-    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringUni(
       [Runtime.InteropServices.Marshal]::SecureStringToBSTR($LinuxPassword))
   } else {
-    $sec1 = Read-Host "Senha do usuario $LinuxUser" -AsSecureString
-    $sec2 = Read-Host "Confirme a senha" -AsSecureString
-    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
+    $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
+    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringUni(
       [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec1))
-    $LinuxPass2 = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    $LinuxPass2 = [Runtime.InteropServices.Marshal]::PtrToStringUni(
       [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec2))
     if ($LinuxPass -cne $LinuxPass2 -or [string]::IsNullOrEmpty($LinuxPass)) {
       Fail "Senhas diferentes ou vazias - rode de novo"; throw "Senhas diferentes ou vazias"
@@ -164,11 +170,20 @@ if (-not $Resume) {
   # Modo de rede: [1] localhost fixo 127.0.0.1 via mirrored (recomendado, padrao: endpoint
   # estavel, sem redescoberta, assinatura do .rdp sempre valida) ou [2] IP dinamico
   # descoberto automaticamente a cada clique (p/ Windows sem mirrored).
+  # View (TUI com fallback Read-Host); regra pura em Resolve-NetworkChoice.
   if ([string]::IsNullOrWhiteSpace($NetChoice)) {
-    $NetChoice = Read-Host "Modo de rede [1] localhost fixo 127.0.0.1 (recomendado) ou [2] IP dinamico a cada clique [1]"
-    if ([string]::IsNullOrWhiteSpace($NetChoice)) { $NetChoice = "1" }
+    if (Test-TuiAvailable -NoTui:$NoTui) {
+      $menuIdx = Show-SingleChoiceMenu -Title "Modo de rede" `
+        -Options @('[1] localhost fixo 127.0.0.1 (recomendado)', '[2] IP dinamico a cada clique') `
+        -DefaultIndex 0 -NoTui:$NoTui
+      $NetChoice = if ($menuIdx -eq 1) { "2" } else { "1" }
+    } else {
+      $NetChoice = Read-Host "Modo de rede [1] localhost fixo 127.0.0.1 (recomendado) ou [2] IP dinamico a cada clique [1]"
+    }
   }
-  $WantMirrored = ($NetChoice.Trim() -ne "2")
+  $NetResolved = Resolve-NetworkChoice -NetChoice $NetChoice
+  $NetChoice = $NetResolved.Normalized
+  $WantMirrored = $NetResolved.WantMirrored
   if ($WantMirrored) { Ok "Modo: localhost fixo 127.0.0.1 (masked)" }
   else { Write-Host "  Modo: IP dinamico - o atalho identifica o IP automaticamente a cada clique" -ForegroundColor Yellow }
 
@@ -476,7 +491,9 @@ if (Test-Path $RdpPath) { Ok "Login automatico pronto (abre direto, sem senha)" 
 else { Fail "Arquivo .rdp sumiu"; throw "RDP sumiu" }
 
 Write-Host ""
-if ($script:Failures.Count -eq 0) {
+$FeedbackState = @{ Failures = @($script:Failures) }
+$LiveFailures = @(Get-UbuntuGuiFailures -State $FeedbackState)
+if ($LiveFailures.Count -eq 0) {
   Remove-Item $LogFile -Force -ErrorAction SilentlyContinue  # higiene: transcript guarda a senha
   Clear-ResumeState $RunOncePath $RunOnceName $ResumeFile $ResumePs1  # higiene: estado de retomada guarda a senha (DPAPI)
   $ip = Get-FirstIpAddress (wsl -d $DISTRO -- hostname -I 2>$null)
