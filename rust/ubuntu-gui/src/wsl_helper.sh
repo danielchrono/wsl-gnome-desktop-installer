@@ -7,6 +7,8 @@
 #   unlock-probe <senha>   unlock por stdin + sonda na MESMA chamada (daemon efemero)
 #   login-create <senha>   daemon novo com --login (cria + ja destravado)
 #   keyring-check <caminho>  OK / MISSING
+#   mirror-rank <urls...>  mede InRelease em paralelo, imprime TIME <secs|FAIL> <url>
+#   mirror-set <url> <senha-sudo>  troca o host do archive (backup antes, idempotente)
 #   version                UBUNTUGUI_HELPER_VERSION
 #
 # SEM pkill aqui de proposito: matar daemon e criar sao chamadas WSL
@@ -37,6 +39,43 @@ case "${1:?subcomando}" in
     ;;
   keyring-check)
     if [ -f "$2" ]; then echo OK; else echo MISSING; fi
+    ;;
+  mirror-rank)
+    # Codename nativo do /etc/os-release; so vence quem devolve 200 no
+    # InRelease (URL morta perde sozinha). Paralelo => ~5s no total.
+    shift
+    codename="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-}")"
+    if [ -z "$codename" ]; then echo "TIME FAIL no-codename"; exit 0; fi
+    tmp="$(mktemp)"
+    for u in "$@"; do
+      (
+        out="$(curl -o /dev/null -s -w '%{http_code} %{time_total}' -L --max-time 5 "$u/dists/$codename/InRelease" 2>/dev/null)" || out="000 0"
+        code="${out%% *}"; secs="${out##* }"
+        if [ "$code" = "200" ]; then echo "TIME $secs $u"; else echo "TIME FAIL $u"; fi
+      >>"$tmp") &
+    done
+    wait
+    cat "$tmp"; rm -f "$tmp"
+    ;;
+  mirror-set)
+    # Troca o host do archive nos dois formatos (DEB822 ubuntu.sources +
+    # legado sources.list). Security fica como esta (CDN, pequeno). Backup
+    # com timestamp ANTES (nunca cego); sem archive-url = nada a fazer
+    # (KEEP converge rerun; FAIL so se o sudo falhar).
+    new="$2"; pw="$3"
+    result="KEEP $new"
+    for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+      [ -f "$f" ] || continue
+      grep -q 'http://archive\.ubuntu\.com/ubuntu' "$f" || continue
+      ts="$(date +%Y%m%d-%H%M%S)"
+      if printf '%s\n' "$pw" | sudo -S cp "$f" "$f.bak-$ts" 2>/dev/null \
+        && printf '%s\n' "$pw" | sudo -S sed -i "s|http://archive\.ubuntu\.com/ubuntu|$new|g" "$f" 2>/dev/null; then
+        result="SET $new"
+      else
+        result="FAIL $new"; break
+      fi
+    done
+    echo "$result"
     ;;
   version)
     echo "UBUNTUGUI_HELPER_VERSION=$UBUNTUGUI_HELPER_VERSION"

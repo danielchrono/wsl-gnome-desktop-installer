@@ -423,8 +423,8 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     use std::time::Duration;
 
     use crate::{
-        cert, distro_list, feedback, health, input, ip, launcher, passquote, rdp, resume, secure,
-        tui, vault, wsl_cmd,
+        cert, distro_list, feedback, health, helper, input, ip, launcher, passquote, rdp, resume,
+        secure, tui, vault, wsl_cmd,
     };
 
     let d = crate::constants::defaults();
@@ -828,6 +828,31 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         &gui_installed_check_command(&gui_package),
     )?;
     if r.out.contains("MISSING") {
+        // Espelho mais rapido ANTES de baixar ~2 GB: mede InRelease das
+        // candidatas em paralelo (~5s) e troca o host com backup. Fail-open:
+        // sem vencedor, segue no padrao sem quebrar nada.
+        let rank = wsl_cmd::invoke_wsl(
+            Some(&distro),
+            &linux_user,
+            &helper::mirror_rank_command(&d.ubuntu_mirrors),
+        )?;
+        match helper::pick_fastest_mirror(&rank.out) {
+            Some((url, secs)) => {
+                let set = wsl_cmd::invoke_wsl(
+                    Some(&distro),
+                    &linux_user,
+                    &helper::mirror_set_command(&pwq, &url),
+                )?;
+                if set.out.contains("SET") {
+                    rep.ok(&format!("Espelho mais rapido: {url} ({secs:.2}s)"));
+                } else if set.out.contains("FAIL") {
+                    rep.warn("Troca de espelho falhou - seguindo no padrao");
+                }
+            }
+            None => {
+                rep.warn("Sem espelho melhor alcancavel - seguindo no padrao");
+            }
+        }
         rep.say("  apt update + instalacao (~2 GB, demora; barra ao vivo abaixo)...");
         let mut ok = false;
         for i in 1..=d.apt_retries {

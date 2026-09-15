@@ -33,7 +33,8 @@ retoma sozinho depois; senha com 3 tentativas no modo interativo).
 1. Habilita o WSL, instala a distro e configura rede (mirrored ou dinâmica).
 2. Cria o usuário Linux (**nunca apaga conta existente** — só sincroniza a senha)
    e ativa o systemd.
-3. Instala `ubuntu-desktop-minimal` + GNOME Remote Desktop.
+3. Instala `ubuntu-desktop-minimal` + GNOME Remote Desktop (espelho APT
+   mais rápido medido na hora, com backup do `sources`).
 4. Sobe o GNOME Shell headless na resolução do seu monitor.
 5. Configura RDP com TLS (porta **3390** — a 3389 é a porta do RDP do host e
    o loopback dela é instável entre máquinas; medido: trava sem listener),

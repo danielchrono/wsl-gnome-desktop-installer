@@ -36,6 +36,8 @@ pub struct UbuntuGuiDefaults {
     pub tls_cert_path: String,
     pub tls_key_path: String,
     pub keyring_reprobe_sec: u64,
+    /// Candidatas a espelho APT (rank mede InRelease; so 200 vence).
+    pub ubuntu_mirrors: Vec<String>,
     pub icon_sizes: Vec<u32>,
 }
 
@@ -73,6 +75,14 @@ pub fn defaults() -> UbuntuGuiDefaults {
         tls_cert_path: "~/.local/share/gnome-remote-desktop/rdp-cert.pem".to_string(),
         tls_key_path: "~/.local/share/gnome-remote-desktop/rdp-key.pem".to_string(),
         keyring_reprobe_sec: 5,
+        ubuntu_mirrors: vec![
+            "http://archive.ubuntu.com/ubuntu".to_string(),
+            "http://br.archive.ubuntu.com/ubuntu".to_string(),
+            "http://mirror.ufscar.br/ubuntu".to_string(),
+            "http://ubuntu.c3sl.ufpr.br/ubuntu".to_string(),
+            "http://mirror.unesp.br/ubuntu".to_string(),
+            "https://mirrors.edge.kernel.org/ubuntu".to_string(),
+        ],
         icon_sizes: vec![16, 32, 48, 128, 256],
     }
 }
@@ -98,6 +108,16 @@ mod tests {
         assert_eq!(d.cred_retries, 2);
         assert_eq!(d.apt_retries, 3);
         assert_eq!(d.keyring_reprobe_sec, 5);
+    }
+
+    #[test]
+    fn mirror_shortlist_has_baseline_and_br() {
+        let d = defaults();
+        assert!(d
+            .ubuntu_mirrors
+            .iter()
+            .any(|u| u == "http://archive.ubuntu.com/ubuntu"));
+        assert!(d.ubuntu_mirrors.iter().any(|u| u.contains("br.archive")));
     }
 
     #[test]

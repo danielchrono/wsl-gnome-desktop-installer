@@ -62,18 +62,69 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Cano comum: script em base64 (alfabeto shell-safe) ate o `bash -s`.
+fn helper_pipe() -> String {
+    format!(
+        "echo {} | base64 -d |",
+        base64_encode(HELPER_SCRIPT.as_bytes())
+    )
+}
+
 /// Monta `echo <b64> | base64 -d | <env> bash -s <sub> <args>`.
 pub fn helper_invoke_command(uid: &str, subcommand: &str, args: &str) -> String {
-    let blob = base64_encode(HELPER_SCRIPT.as_bytes());
     let args = if args.is_empty() {
         String::new()
     } else {
         format!(" {args}")
     };
     format!(
-        "echo {blob} | base64 -d | {} bash -s {subcommand}{args}",
+        "{} {} bash -s {subcommand}{args}",
+        helper_pipe(),
         crate::vault::session_env(uid)
     )
+}
+
+/// `mirror-rank <urls...>`: sem env (curl puro, sem bus).
+pub fn mirror_rank_command(mirrors: &[String]) -> String {
+    format!("{} bash -s mirror-rank {}", helper_pipe(), mirrors.join(" "))
+}
+
+/// `mirror-set <url> '<pwq>'`: sem env (sudo+sed, sem bus).
+pub fn mirror_set_command(password_quote: &str, url: &str) -> String {
+    format!(
+        "{} bash -s mirror-set {url} '{password_quote}'",
+        helper_pipe()
+    )
+}
+
+/// Escolhe o menor tempo entre linhas `TIME <secs> <url>` (FAIL/lixo fora;
+/// empate = primeira; tudo-falha = None). Decisao em Rust testavel; o bash
+/// so mede.
+pub fn pick_fastest_mirror(out: &str) -> Option<(String, f64)> {
+    let mut best: Option<(String, f64)> = None;
+    for line in out.lines() {
+        let Some(rest) = line.strip_prefix("TIME ") else {
+            continue;
+        };
+        let mut parts = rest.splitn(2, ' ');
+        let (Some(secs_str), Some(url)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if url.trim().is_empty() {
+            continue;
+        }
+        let Ok(secs) = secs_str.parse::<f64>() else {
+            continue;
+        };
+        let replace = match &best {
+            Some((_, t)) => secs < *t,
+            None => true,
+        };
+        if replace {
+            best = Some((url.to_string(), secs));
+        }
+    }
+    best
 }
 
 /// `probe` diagnostico (2>&1 dentro do script).
@@ -158,5 +209,80 @@ mod tests {
         assert!(cmd.ends_with("bash -s probe"));
         let cmd = helper_unlock_probe_command("pw", "1000");
         assert!(cmd.ends_with("bash -s unlock-probe 'pw'"));
+    }
+
+    #[test]
+    fn script_has_mirror_subcommands() {
+        for sub in ["mirror-rank)", "mirror-set)"] {
+            assert!(HELPER_SCRIPT.contains(sub), "falta subcomando {sub}");
+        }
+    }
+
+    #[test]
+    fn mirror_rank_is_read_only_and_bounded() {
+        let body = HELPER_SCRIPT
+            .split("mirror-rank)")
+            .nth(1)
+            .unwrap_or("")
+            .split("mirror-set)")
+            .next()
+            .unwrap_or("");
+        assert!(body.contains("curl"), "rank mede de verdade");
+        assert!(body.contains("--max-time"), "rank com teto de tempo");
+        assert!(body.contains("VERSION_CODENAME"), "codename nativo");
+        assert!(!body.contains("sudo"), "rank nao escreve nada");
+        assert!(!body.contains("sed -i"), "rank nao escreve nada");
+    }
+
+    #[test]
+    fn mirror_set_backs_up_and_covers_both_formats() {
+        let body = HELPER_SCRIPT
+            .split("mirror-set)")
+            .nth(1)
+            .unwrap_or("")
+            .split("version)")
+            .next()
+            .unwrap_or("");
+        assert!(body.contains(".bak-"), "backup antes de trocar");
+        assert!(body.contains("sed -i"), "troca inplace");
+        assert!(body.contains("ubuntu.sources"), "formato DEB822");
+        assert!(body.contains("sources.list"), "formato legado");
+        assert!(body.contains("sudo -S"), "sudo nao interativo");
+    }
+
+    #[test]
+    fn pick_fastest_ignores_failures_and_picks_min() {
+        let out = "TIME 1.280882 http://archive.ubuntu.com/ubuntu\nTIME FAIL http://morto/x\nTIME 0.139701 http://br.archive.ubuntu.com/ubuntu\nlixo\nTIME\n";
+        let (url, secs) = pick_fastest_mirror(out).unwrap();
+        assert_eq!(url, "http://br.archive.ubuntu.com/ubuntu");
+        assert!((secs - 0.139701).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pick_fastest_fail_closed() {
+        assert_eq!(pick_fastest_mirror(""), None);
+        assert_eq!(pick_fastest_mirror("TIME FAIL a\nTIME FAIL b\n"), None);
+        assert_eq!(pick_fastest_mirror("nada a ver\n"), None);
+    }
+
+    #[test]
+    fn pick_fastest_tie_keeps_first() {
+        let out = "TIME 0.5 http://a/x\nTIME 0.5 http://b/x\n";
+        assert_eq!(
+            pick_fastest_mirror(out).unwrap().0,
+            "http://a/x"
+        );
+    }
+
+    #[test]
+    fn mirror_builders_shape() {
+        let rank = mirror_rank_command(&[
+            "http://a/ubuntu".to_string(),
+            "http://b/ubuntu".to_string(),
+        ]);
+        assert!(rank.contains("bash -s mirror-rank http://a/ubuntu http://b/ubuntu"));
+        assert!(!rank.contains("XDG_RUNTIME_DIR"), "rank nao precisa do bus");
+        let set = mirror_set_command("pw", "http://b/ubuntu");
+        assert!(set.ends_with("bash -s mirror-set http://b/ubuntu 'pw'"));
     }
 }
