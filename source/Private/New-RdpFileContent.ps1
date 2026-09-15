@@ -6,7 +6,7 @@ function New-RdpFileContent(
   [string]$PasswordHex,
   [string]$Resolution
 ) {
-  $rdp = @('screen mode id:i:1', 'session bpp:i:32')  # 1 = janela (2 = tela cheia); maximizar continua possivel
+  $rdp = @('screen mode id:i:1', 'session bpp:i:32', 'smart sizing:i:1')  # 1 = janela (2 = tela cheia); maximizar continua possivel; smart sizing = a sessao acompanha a janela (sem barras pretas)
   $rdp += 'usbdevicestoredirect:s:*'  # USB do host na sessao (o servidor/GNOME pode recusar algumas classes)
   if ($Resolution -match '^(\d+)x(\d+)$') {
     $rdp += "desktopwidth:i:$($Matches[1])"

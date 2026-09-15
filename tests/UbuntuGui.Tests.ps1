@@ -75,6 +75,9 @@ Describe 'New-RdpFileContent' {
     ($rdp -contains 'screen mode id:i:1') | Should Be $true
     ($rdp -contains 'usbdevicestoredirect:s:*') | Should Be $true
   }
+  It 'sessao acompanha a janela (sem barras pretas)' {
+    ($rdp -contains 'smart sizing:i:1') | Should Be $true
+  }
 }
 
 Describe 'New-LauncherContent' {

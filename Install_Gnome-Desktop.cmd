@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "46b94f18f41d"
+$SCRIPT_BUILD = "92fe830eeeca"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -669,7 +669,7 @@ function New-RdpFileContent(
   [string]$PasswordHex,
   [string]$Resolution
 ) {
-  $rdp = @('screen mode id:i:1', 'session bpp:i:32')  # 1 = janela (2 = tela cheia); maximizar continua possivel
+  $rdp = @('screen mode id:i:1', 'session bpp:i:32', 'smart sizing:i:1')  # 1 = janela (2 = tela cheia); maximizar continua possivel; smart sizing = a sessao acompanha a janela (sem barras pretas)
   $rdp += 'usbdevicestoredirect:s:*'  # USB do host na sessao (o servidor/GNOME pode recusar algumas classes)
   if ($Resolution -match '^(\d+)x(\d+)$') {
     $rdp += "desktopwidth:i:$($Matches[1])"

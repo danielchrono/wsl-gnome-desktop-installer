@@ -8,8 +8,8 @@
 use crate::error::InstallError;
 
 /// `New-RdpFileContent`: ordem das linhas espelha o PowerShell — `screen
-/// mode` + `bpp`, resolucao (se `WxH`), endereco, usuario, senha, flags.
-/// Resolucao fora de `^(\d+)x(\d+)$` e ignorada (WxH-gate).
+/// mode` + `bpp` + `smart sizing`, resolucao (se `WxH`), endereco, usuario,
+/// senha, flags. Resolucao fora de `^(\d+)x(\d+)$` e ignorada (WxH-gate).
 pub fn new_rdp_file_content(
     rdp_host: &str,
     rdp_port: u16,
@@ -21,6 +21,8 @@ pub fn new_rdp_file_content(
         // 1 = janela (2 = tela cheia); paridade com o PS — maximizar continua possivel.
         "screen mode id:i:1".to_string(),
         "session bpp:i:32".to_string(),
+        // A sessao acompanha a janela (sem barras pretas ao redimensionar).
+        "smart sizing:i:1".to_string(),
     ];
     if let Some((w, h)) = split_resolution(resolution) {
         rdp.push(format!("desktopwidth:i:{w}"));
@@ -169,6 +171,7 @@ mod tests {
             vec![
                 "screen mode id:i:1",
                 "session bpp:i:32",
+                "smart sizing:i:1",
                 "desktopwidth:i:1600",
                 "desktopheight:i:900",
                 "full address:s:127.0.0.1:3390",

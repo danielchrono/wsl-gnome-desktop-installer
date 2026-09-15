@@ -12,6 +12,7 @@ fn rdp_line_order_golden() {
     let order = [
         "screen mode id:i:1",
         "session bpp:i:32",
+        "smart sizing:i:1",
         "desktopwidth:i:1600",
         "desktopheight:i:900",
         "full address:s:127.0.0.1:3390",
