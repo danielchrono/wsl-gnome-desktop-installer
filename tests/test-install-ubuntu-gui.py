@@ -91,6 +91,7 @@ check('senha com retry (nao mata o run)', 'PasswordMaxAttempts' in src and 'tent
 check('CFA: libera com permissao, atalho nunca fatal', 'ControlledFolderAccessAllowedApplications' in src and 'EnableControlledFolderAccess' in src and 'Atalhos nao criados' not in src)
 check('cert TLS confiavel no Root (sem admin)', "X509Store('Root', 'CurrentUser')" in src)
 check('mstsc reinstalado sozinho quando ausente', 'linkid=2247659' in src and 'Cliente RDP (mstsc) restaurado' in src)
+check('auto-elevacao com UAC (sem bypass)', '-Verb RunAs' in src and 'Auto-elevacao' in src and 'Unattended nunca relanca' in src)
 check('limpa retomada no sucesso', 'Clear-ResumeState' in src)
 check('versao 0.1.0', 'SCRIPT_VERSION' in src and '"0.1.0"' in src)
 tracked = []
