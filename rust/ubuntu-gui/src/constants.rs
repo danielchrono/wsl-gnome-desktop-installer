@@ -35,7 +35,7 @@ pub struct UbuntuGuiDefaults {
     pub keyring_path: String,
     pub tls_cert_path: String,
     pub tls_key_path: String,
-    pub pam_sudo_path: String,
+    pub keyring_reprobe_sec: u64,
     pub icon_sizes: Vec<u32>,
 }
 
@@ -72,7 +72,7 @@ pub fn defaults() -> UbuntuGuiDefaults {
         keyring_path: "~/.local/share/keyrings/login.keyring".to_string(),
         tls_cert_path: "~/.local/share/gnome-remote-desktop/rdp-cert.pem".to_string(),
         tls_key_path: "~/.local/share/gnome-remote-desktop/rdp-key.pem".to_string(),
-        pam_sudo_path: "/etc/pam.d/sudo".to_string(),
+        keyring_reprobe_sec: 5,
         icon_sizes: vec![16, 32, 48, 128, 256],
     }
 }
@@ -97,6 +97,7 @@ mod tests {
         assert_eq!(d.cred_timeout_sec, 60);
         assert_eq!(d.cred_retries, 2);
         assert_eq!(d.apt_retries, 3);
+        assert_eq!(d.keyring_reprobe_sec, 5);
     }
 
     #[test]

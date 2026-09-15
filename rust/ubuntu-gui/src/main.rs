@@ -50,7 +50,8 @@ struct Cli {
     #[arg(long)]
     fallback_res: Option<String>,
 
-    /// Porta RDP (padrao centralizado, longe da 3389).
+    /// Porta RDP (padrao 3390, longe da 3389 que e a porta do RDP do host).
+    /// Se explicita, pre-voo TCP avisa quando ocupada (tenta mesmo assim).
     #[arg(long)]
     rdp_port: Option<u16>,
 

@@ -28,10 +28,10 @@ pub enum InstallError {
     ShellDown,
     /// `throw "Cofre nao criado"`
     KeyringMissing,
-    /// `throw "PAM adulterado"`
-    PamTainted,
     /// `throw "Cofre bloqueado"`
     KeyringLocked,
+    /// `throw "Cofre ausente"` (daemon sem colecao login: restaurar backup)
+    KeyringAbsent,
     /// `throw "Credencial nao gravada"`
     CredentialNotStored,
     /// `throw "RDP nao subiu"`
@@ -70,8 +70,8 @@ impl InstallError {
             Self::AptFailed => "APT falhou",
             Self::ShellDown => "Shell nao subiu",
             Self::KeyringMissing => "Cofre nao criado",
-            Self::PamTainted => "PAM adulterado",
             Self::KeyringLocked => "Cofre bloqueado",
+            Self::KeyringAbsent => "Cofre ausente",
             Self::CredentialNotStored => "Credencial nao gravada",
             Self::RdpDown => "RDP nao subiu",
             Self::RdpNotCreated => "RDP nao criado",
@@ -140,8 +140,8 @@ mod tests {
             (InstallError::AptFailed, "APT falhou"),
             (InstallError::ShellDown, "Shell nao subiu"),
             (InstallError::KeyringMissing, "Cofre nao criado"),
-            (InstallError::PamTainted, "PAM adulterado"),
             (InstallError::KeyringLocked, "Cofre bloqueado"),
+            (InstallError::KeyringAbsent, "Cofre ausente"),
             (InstallError::CredentialNotStored, "Credencial nao gravada"),
             (InstallError::RdpDown, "RDP nao subiu"),
             (InstallError::RdpNotCreated, "RDP nao criado"),

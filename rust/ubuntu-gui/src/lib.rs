@@ -6,6 +6,7 @@
 //! - `Write-Feedback.ps1` -> [`feedback`]
 //! - `Invoke-WslCommand.ps1` -> [`wsl_cmd`]
 //! - `Invoke-VaultCredential.ps1` -> [`vault`]
+//! - helper bash do cofre (embarcado) -> [`helper`]
 //! - `Get-PasswordQuote.ps1` -> [`passquote`]
 //! - `ConvertFrom-SecureStringPlain.ps1` -> [`secure`]
 //! - `ConvertFrom-WslDistroList.ps1` -> [`distro_list`]
@@ -32,6 +33,7 @@ pub mod distro_list;
 pub mod error;
 pub mod feedback;
 pub mod health;
+pub mod helper;
 pub mod input;
 pub mod install;
 pub mod ip;

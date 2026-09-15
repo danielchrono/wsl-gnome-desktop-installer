@@ -164,22 +164,17 @@ pub fn tls_cert_create_command(tls_cert_path: &str, tls_key_path: &str, tls_days
     )
 }
 
-/// Checagem do cofre login.
-pub fn keyring_check_command(keyring_path: &str) -> String {
-    format!("test -f {keyring_path} && echo OK || echo MISSING")
-}
-
-/// Cofre via PAM do sudo (cria com a senha; revertido em seguida). O `tee`
-/// recebe SENHA + CONTEUDO no mesmo stdin: o sudo consome a 1a linha.
-pub fn pam_setup_command(password_quote: &str, pam_sudo_path: &str) -> String {
-    format!(
-        "printf '%s\\nauth optional pam_gnome_keyring.so\\nsession optional pam_gnome_keyring.so auto_start\\n' '{password_quote}' | sudo -S tee -a {pam_sudo_path} > /dev/null && printf '%s\\n' '{password_quote}' | sudo -S true && printf '%s\\n' '{password_quote}' | sudo -S sed -i '/pam_gnome_keyring.so/d' {pam_sudo_path}"
-    )
-}
-
-/// Confere que o PAM voltou ao original (espera `"0"`).
-pub fn pam_grep_command(pam_sudo_path: &str) -> String {
-    format!("grep -c pam_gnome_keyring {pam_sudo_path} 2>/dev/null")
+/// Pre-voo da `--rdp-port` explicita: porta ocupada AGORA? Aviso apenas —
+/// a verificacao pos-apply e o gate real, e rerun com a mesma porta ocupada
+/// pelo proprio RDP anterior nao pode falhar.
+pub fn probe_tcp_port(host: &str, port: u16, timeout_ms: u64) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let addr: SocketAddr = match format!("{host}:{port}").parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)).is_ok()
 }
 
 /// Aplica TLS/porta + habilita e reinicia o RDP.
@@ -863,53 +858,107 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         )?;
         rep.ok("Certificado TLS criado");
     }
-    let r = wsl_cmd::invoke_wsl(
-        Some(&distro),
-        &linux_user,
-        &keyring_check_command(&d.keyring_path),
-    )?;
-    if r.out.contains("MISSING") {
-        let _ = wsl_cmd::invoke_wsl(
-            Some(&distro),
-            &linux_user,
-            &pam_setup_command(&pwq, &d.pam_sudo_path),
-        )?;
-    }
-    let r = wsl_cmd::invoke_wsl(
-        Some(&distro),
-        &linux_user,
-        &keyring_check_command(&d.keyring_path),
-    )?;
-    if r.out.contains("OK") {
-        rep.ok("Cofre login pronto");
-    } else {
-        rep.fail("Cofre nao criado".to_string());
-        return Err(InstallError::KeyringMissing);
-    }
-    let pam_count = wsl_cmd::invoke_wsl(
-        Some(&distro),
-        &linux_user,
-        &pam_grep_command(&d.pam_sudo_path),
-    )?;
-    if pam_count.out.trim() != "0" {
-        rep.fail("/etc/pam.d/sudo nao voltou ao original - verifique".to_string());
-        return Err(InstallError::PamTainted);
-    }
-    rep.ok("/etc/pam.d/sudo intacto");
-
     let uid = wsl_cmd::invoke_wsl(Some(&distro), &linux_user, "id -u")?
         .out
         .trim()
         .to_string();
+    // Prestart leve: daemon no ar antes de tudo (warn-only, nunca aborta;
+    // criar via --login cobre o resto).
+    if vault::start_keyring_daemon_live(Some(&distro), &linux_user, &uid) {
+        rep.ok("Daemon do cofre no ar");
+    } else {
+        rep.warn("Daemon do cofre nao respondeu - tentando criar via --login mesmo assim");
+    }
+    // Cria quando ausente (via --login: sem sudo/pam.d, ja sai destravado).
+    let (created, fresh) = vault::ensure_login_keyring_live(
+        Some(&distro),
+        &linux_user,
+        &pwq,
+        &uid,
+        &d.keyring_path,
+    )?;
+    if fresh {
+        rep.ok("Cofre login criado com a senha informada");
+    } else if created {
+        rep.ok("Cofre login pronto");
+    } else {
+        rep.fail("Cofre nao criado (confira ~/.local/share/keyrings/login.keyring e backups *.bak* - sem o arquivo nenhum unlock funciona)".to_string());
+        return Err(InstallError::KeyringMissing);
+    }
     rep.say("  Desbloqueando o cofre...");
-    let unlock = vault::unlock_keyring_live(&linux_user, &pwq, &uid)?;
-    if unlock.code != 0 {
-        rep.fail(format!("Cofre nao desbloqueou com a senha informada ({}) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo", unlock.out.trim()));
+    // Pula unlock se ja destravado (ex.: criado agora via --login).
+    let (pam_state, _) = vault::probe_state_live(Some(&distro), &linux_user, &uid)?;
+    let uk = if pam_state == vault::ProbeState::Unlocked {
+        rep.ok("Cofre ja destravado (pulando unlock)");
+        vault::UnlockProbe {
+            unlock_code: 0,
+            probe: "via --login".to_string(),
+            unlock_text: "(via --login)".to_string(),
+            state: vault::ProbeState::Unlocked,
+        }
+    } else {
+        vault::unlock_and_probe_live(Some(&distro), &linux_user, &pwq, &uid)?
+    };
+    if uk.unlock_code != 0 {
+        rep.fail(format!("Cofre nao desbloqueou com a senha informada ({}) - cofre de outro run? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo nada funciona)", uk.unlock_text.trim()));
         return Err(InstallError::KeyringLocked);
     }
-    if !vault::test_keyring_unlocked_live(&linux_user, &uid).unwrap_or(false) {
-        rep.fail("Cofre segue trancado apos o unlock (sem prompt p/ abrir: gravacao travaria) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo".to_string());
-        return Err(InstallError::KeyringLocked);
+    if uk.state != vault::ProbeState::Unlocked {
+        // Uma repeticao absorve ativacao lenta do D-Bus; depois classifica
+        // Locked (cofre de outro run) vs Missing/Error (outro conserto).
+        std::thread::sleep(std::time::Duration::from_secs(d.keyring_reprobe_sec));
+        let uk2 = vault::unlock_and_probe_live(Some(&distro), &linux_user, &pwq, &uid)?;
+        if uk2.state == vault::ProbeState::Unlocked {
+            rep.ok("Cofre destravou na re-sonda");
+        } else if uk2.state == vault::ProbeState::Missing {
+            rep.fail(format!("Colecao login ausente (daemon responde mas sem colecao: arquivo ~/.local/share/keyrings/login.keyring sumiu ou daemon anterior a ele - retorno: {}) - restaure um backup *.bak* para login.keyring (com cp, sem apagar o backup) e rode de novo", uk2.probe));
+            return Err(InstallError::KeyringAbsent);
+        } else if uk2.state == vault::ProbeState::Error {
+            rep.fail(format!("Sonda do cofre falhou (nao e 'trancado': D-Bus/sessao?) - retorno: {} - unlock disse: {} - tente 'wsl --shutdown' e rode de novo", uk2.probe, uk2.unlock_text));
+            return Err(InstallError::KeyringLocked);
+        } else {
+            // Teste de controle: senha GARANTIDAMENTE errada. Rejeitada
+            // (!= 0) = exits significativos = senha incorreta de verdade.
+            let ctl = vault::unlock_and_probe_live(
+                Some(&distro),
+                &linux_user,
+                vault::FALSE_PROBE_PASSWORD,
+                &uid,
+            )?;
+            if ctl.unlock_code != 0 {
+                rep.fail(format!("Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: {}) - No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo nada funciona)", uk2.unlock_text));
+                return Err(InstallError::KeyringLocked);
+            }
+            rep.warn("Senha nao confere para o cofre existente (unlock por stdin nao valida nada aqui: senha falsa tambem sai 0) - recriando o cofre com a senha informada (backup automatico, original preservado)");
+            let (recreated, backup) = vault::reset_login_keyring_live(
+                Some(&distro),
+                &linux_user,
+                &pwq,
+                &uid,
+                &d.keyring_path,
+            )?;
+            if !recreated {
+                rep.fail(format!("Recriacao falhou de forma inesperada e o original foi restaurado de {backup} - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo"));
+                return Err(InstallError::KeyringLocked);
+            }
+            rep.ok(&format!(
+                "Cofre recriado com a senha informada (original em {backup})"
+            ));
+            let (restored_state, _) =
+                vault::probe_state_live(Some(&distro), &linux_user, &uid)?;
+            if restored_state == vault::ProbeState::Unlocked {
+                rep.ok("Cofre destravou apos recriar (via --login)");
+            } else {
+                let uk3 =
+                    vault::unlock_and_probe_live(Some(&distro), &linux_user, &pwq, &uid)?;
+                if uk3.state == vault::ProbeState::Unlocked {
+                    rep.ok("Cofre destravou apos recriar");
+                } else {
+                    rep.fail(format!("Cofre recriado mas segue trancado (sonda: {} - unlock disse: {}) - tente 'wsl --shutdown' e rode de novo", uk3.probe, uk3.unlock_text));
+                    return Err(InstallError::KeyringLocked);
+                }
+            }
+        }
     }
     rep.say(&format!(
         "  Gravando credencial RDP no cofre (pode levar ate ~{}s por tentativa, nao feche)...",
@@ -935,10 +984,15 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         }
     }
     if !stored {
-        rep.fail(format!("Credencial RDP nao gravou no cofre (ultima saida: {last_out} - cofre trancado com outra senha? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo)"));
+        rep.fail(format!("Credencial RDP nao gravou no cofre (ultima saida: {last_out} - cofre trancado com outra senha? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo (nunca rm: sem o arquivo nada funciona))"));
         return Err(InstallError::CredentialNotStored);
     }
     rep.ok("Credencial RDP gravada");
+    // Pre-voo da porta explicita (medido: 3389 trava no loopback sem
+    // listener; com RDP de verdade funciona - mas o padrao segue 3390).
+    if opts.rdp_port.is_some() && probe_tcp_port("127.0.0.1", rdp_port, 1500) {
+        rep.warn(&format!("Porta {rdp_port} parece ocupada (pode ser instalacao anterior) - tentando mesmo assim; a verificacao final decide"));
+    }
     rep.say(&format!(
         "  Aplicando TLS/porta {rdp_port} e reiniciando o servico..."
     ));
@@ -1363,17 +1417,29 @@ mod tests {
     }
 
     #[test]
-    fn tls_and_keyring_commands() {
+    fn tls_commands() {
         assert!(tls_cert_create_command("c", "k", 825).contains("-days 825"));
         assert!(tls_cert_create_command("c", "k", 825).contains("-subj '/CN=ubuntu-wsl'"));
-        assert!(pam_setup_command("pw", "/etc/pam.d/sudo").contains("pam_gnome_keyring.so"));
-        assert!(
-            pam_setup_command("pw", "/etc/pam.d/sudo").contains("sed -i '/pam_gnome_keyring.so/d'")
-        );
         assert_eq!(
-            pam_grep_command("/etc/pam.d/sudo"),
-            "grep -c pam_gnome_keyring /etc/pam.d/sudo 2>/dev/null"
+            tls_cert_check_command("c"),
+            "test -f c && echo OK || echo MISSING"
         );
+    }
+
+    #[test]
+    fn tcp_probe_sees_live_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(probe_tcp_port("127.0.0.1", port, 1000));
+    }
+
+    #[test]
+    fn tcp_probe_reports_free_port() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        assert!(!probe_tcp_port("127.0.0.1", port, 500));
     }
 
     #[test]
