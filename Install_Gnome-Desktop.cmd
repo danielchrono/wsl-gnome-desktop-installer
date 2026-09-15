@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "1818d37d4b67"
+$SCRIPT_BUILD = "30ecc767275d"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -1406,9 +1406,12 @@ else { Fail "Arquivo .rdp nao criado"; throw "RDP nao criado" }
 # Assina o .rdp p/ sumir o aviso "fornecedor desconhecido" (rerun reassina apos regerar).
 # rdpsign ausente (SKU sem o binario, ou powershell 32-bit vendo SysWOW64) nao
 # pode matar a instalacao: assinatura e cosmetica, o .rdp funciona sem ela.
-$rdpSign = "$env:SystemRoot\System32\rdpsign.exe"
-if ((-not [Environment]::Is64BitProcess) -and (Test-Path "$env:SystemRoot\Sysnative\rdpsign.exe")) { $rdpSign = "$env:SystemRoot\Sysnative\rdpsign.exe" }
-if (Test-Path $rdpSign) {
+# Resolve nos dois contextos (elevado ou nao, 32 ou 64-bit): o processo que
+# executa pode ver um System32 diferente (redirecionamento SysWOW64), entao
+# sonda as duas visoes sempre em vez de escolher por bitness.
+$rdpSign = @("$env:SystemRoot\System32\rdpsign.exe", "$env:SystemRoot\Sysnative\rdpsign.exe") |
+  Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($rdpSign -and (Test-Path $rdpSign)) {
   & $rdpSign /sha256 $pubCert.Thumbprint "$RdpPath" | Out-Null
 } else {
   Warn "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)"
