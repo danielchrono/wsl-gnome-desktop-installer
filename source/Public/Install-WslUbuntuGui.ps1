@@ -59,6 +59,9 @@ $CredTimeoutSec  = $D.CredTimeoutSec
 $CredRetries     = $D.CredRetries
 $KeyringReprobeSec = $D.KeyringReprobeSec
 $AptRetries      = $D.AptRetries
+$AptRetrySec     = $D.AptRetrySec
+$NetWaitTries    = $D.NetWaitTries
+$NetWaitSec      = $D.NetWaitSec
 $RdpSettleSec    = $D.RdpSettleSec
 $WslWaitSec      = $D.WslShutdownWaitSec
 $ShellWaitSec    = $D.ShellRestartWaitSec
@@ -305,13 +308,36 @@ Step "3/7 Pacote $GUI_PACKAGE (+ openssl, PIL)"
 $apt = "env DEBIAN_FRONTEND=noninteractive"  # via 'env': sudo nao entende 'export'
 $r = Invoke-Wsl $LinuxUser "dpkg -l $GUI_PACKAGE 2>/dev/null | grep -q '^ii' && echo OK || echo MISSING"
 if ($r.Out -match "MISSING") {
-  Write-Host "  apt update + instalacao (~2 GB, demora)..." -ForegroundColor Yellow
+  Write-Host "  apt update + instalacao (~2 GB, demora; barra ao vivo abaixo)..." -ForegroundColor Yellow
+  # Pos-reboot o WSL pode subir sem rede/DNS por alguns segundos: esperar aqui
+  # (antes a 1a tentativa ja queimava com 'Temporary failure resolving...').
+  $netOk = $false
+  for ($w = 1; $w -le $NetWaitTries -and -not $netOk; $w++) {
+    wsl -d $DISTRO -- getent hosts archive.ubuntu.com >$null 2>&1
+    if ($LASTEXITCODE -eq 0) { $netOk = $true }
+    else {
+      Write-Host "  Aguardando rede do WSL ($w/$NetWaitTries)..." -ForegroundColor Yellow
+      Start-Sleep -Seconds $NetWaitSec
+    }
+  }
+  if (-not $netOk) { Warn "WSL sem DNS para archive.ubuntu.com - tentando o APT mesmo assim" }
   $ok = $false
   for ($i = 1; $i -le $AptRetries -and -not $ok; $i++) {
-    $r = Invoke-Wsl $LinuxUser "printf '%s\n' '$PWQ' | sudo -S $apt apt-get update 2>&1 | tail -n 1"
-    $r = Invoke-Wsl $LinuxUser "printf '%s\n' '$PWQ' | sudo -S $apt apt-get install -y $GUI_PACKAGE gnome-remote-desktop openssl python3-pil curl 2>&1 | tail -n 2"
+    if ($i -gt 1) {
+      Write-Host "  Aguardando ${AptRetrySec}s antes da tentativa $i..." -ForegroundColor Yellow
+      Start-Sleep -Seconds $AptRetrySec
+    }
+    # dpkg interrompido (reboot/janela fechada no meio do apt) mata QUALQUER
+    # tentativa: recupera TODA vez (em sistema limpo e no-op de segundos).
+    # Stdio HERDADO (sem tail, sem captura): a barra do apt desenha AO VIVO e
+    # o transcript vira o log de verdade - antes parecia travado e matavam o
+    # script no meio, que era o que quebrava o dpkg.
+    wsl -d $DISTRO -u $LinuxUser --exec bash -c "printf '%s\n' '$PWQ' | sudo -S $apt dpkg --configure -a 2>&1"
+    wsl -d $DISTRO -u $LinuxUser --exec bash -c "printf '%s\n' '$PWQ' | sudo -S $apt apt-get install -f -y 2>&1"
+    wsl -d $DISTRO -u $LinuxUser --exec bash -c "printf '%s\n' '$PWQ' | sudo -S $apt apt-get update 2>&1"
+    wsl -d $DISTRO -u $LinuxUser --exec bash -c "printf '%s\n' '$PWQ' | sudo -S $apt apt-get install -y $GUI_PACKAGE gnome-remote-desktop openssl python3-pil curl 2>&1"
     $ok = ((Invoke-Wsl $LinuxUser "dpkg -l $GUI_PACKAGE 2>/dev/null | grep -q '^ii'").Code -eq 0)
-    if (-not $ok) { Warn "Tentativa $i falhou, tentando de novo..." }
+    if (-not $ok) { Warn "Tentativa $i falhou - veja o log, tentando de novo..." }
   }
   if (-not $ok) { Fail "APT nao concluiu apos $AptRetries tentativas - veja o log"; throw "APT falhou" }
 }
