@@ -202,6 +202,29 @@ Describe 'Get-WslKeyringLockDetail' {
   }
 }
 
+Describe 'Test-WslUnlockExitMeaningful' {
+  It 'exit != 0 na falsa => significativo (True)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          return @{ Code = 0; Out = "UBUNTUGUI_UNLOCKCODE=3`nUBUNTUGUI_PROBE=b true" } }
+        Test-WslUnlockExitMeaningful -LinuxUser 'u' -Uid '1000'
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be $true
+  }
+  It 'exit 0 na falsa => stdin nao valida (False)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          return @{ Code = 0; Out = "UBUNTUGUI_UNLOCKCODE=0`nUBUNTUGUI_PROBE=b true" } }
+        Test-WslUnlockExitMeaningful -LinuxUser 'u' -Uid '1000'
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be $false
+  }
+}
+
 Describe 'Get-WslUnlockPipeline' {
   It 'comando byte-identico ao unlock historico' {
     (& (Get-Module UbuntuGui) { Get-WslUnlockPipeline -PasswordQuote 'pwq' -Uid '1000' }) | Should Be "printf '%s' 'pwq' | XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus gnome-keyring-daemon --unlock 2>&1 | tail -n 3"

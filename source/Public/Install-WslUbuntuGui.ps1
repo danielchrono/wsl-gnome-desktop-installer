@@ -405,7 +405,11 @@ if ($uk.State -ne 'Unlocked') {
     throw "Cofre bloqueado"
   } else {
     $lockDetail = Get-WslKeyringLockDetail -LinuxUser $LinuxUser -Uid $Uid
-    Fail "Cofre segue trancado apos o unlock (unlock saiu $($uk2.UnlockCode); unlock disse: $($uk2.UnlockText); $lockDetail) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo. Se a senha estiver CERTA: abra Senhas e chaves (seahorse), destrave 'login' uma vez, mantenha aberto e rode de novo"
+    if (Test-WslUnlockExitMeaningful -LinuxUser $LinuxUser -Uid $Uid) {
+      Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo com UMA senha definitiva"
+    } else {
+      Fail "Unlock por stdin nao valida senha neste sistema (teste de controle com senha falsa tambem saiu 0; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha aberto e rode de novo"
+    }
     throw "Cofre bloqueado"
   }
 }

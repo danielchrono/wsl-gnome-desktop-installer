@@ -97,6 +97,17 @@ function Test-WslKeyringUnlocked([string]$LinuxUser, [string]$Uid) {
   return ((Get-WslKeyringProbeState -LinuxUser $LinuxUser -Uid $Uid).State -eq 'Unlocked')
 }
 
+# Teste de controle: unlock com senha GARANTIDAMENTE errada (sem efeito
+# colateral: unlock falho nao muda nada). Se sair != 0, exit codes sao
+# significativos neste sistema (e unlock-0 com a senha do usuario = senha
+# aceita => senha incorreta p/ o cofre existente). Se sair 0, o unlock por
+# stdin nao valida nada aqui (e a senha do usuario e inocentada). So chamado
+# no caminho de falha Locked.
+function Test-WslUnlockExitMeaningful([string]$LinuxUser, [string]$Uid) {
+  $probe = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote 'ubuntugui-sonda-falsa-000' -Uid $Uid
+  return ($probe.UnlockCode -ne 0)
+}
+
 # Detalhe so p/ falha Locked: a colecao LOGIN esta trancada ou o DEFAULT aponta
 # p/ outra colecao? Quais arquivos existem, quantos daemons rodam. So leitura,
 # so chamado no caminho de falha (custo zero no sucesso). Se o caminho da

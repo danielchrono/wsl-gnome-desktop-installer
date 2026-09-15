@@ -112,5 +112,6 @@ check('falha Locked traz detalhe (login/arquivos/daemons)', 'function Get-WslKey
 check('unlock+sonda mesma chamada (daemon efemero)', 'function UnlockAndProbe-WslKeyring' in src and 'function Read-UnlockProbeOutput' in src and 'UBUNTUGUI_UNLOCKCODE=' in src and 'UBUNTUGUI_PROBE=' in src)
 check('unlock/sonda via builders unicos', 'function Get-WslUnlockPipeline' in src and 'function Get-WslKeyringProbeCommand' in src and install_src.count('UnlockAndProbe-WslKeyring -LinuxUser') == 2 and 'Unlock-WslKeyring -LinuxUser' not in install_src)
 check('pula unlock se PAM destravou + guia seahorse', 'Cofre ja destravado via PAM (pulando unlock)' in src and 'seahorse' in src and '$pamUnlocked' in install_src)
+check('teste de controle decide senha-errada vs unlock-quebrado', 'function Test-WslUnlockExitMeaningful' in src and 'ubuntugui-sonda-falsa-000' in src and 'Senha incorreta para o cofre existente' in src and 'nao valida senha neste sistema' in src)
 
 sys.exit(1 if fails else 0)

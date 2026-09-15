@@ -207,6 +207,17 @@ function Test-WslKeyringUnlocked([string]$LinuxUser, [string]$Uid) {
   return ((Get-WslKeyringProbeState -LinuxUser $LinuxUser -Uid $Uid).State -eq 'Unlocked')
 }
 
+# Teste de controle: unlock com senha GARANTIDAMENTE errada (sem efeito
+# colateral: unlock falho nao muda nada). Se sair != 0, exit codes sao
+# significativos neste sistema (e unlock-0 com a senha do usuario = senha
+# aceita => senha incorreta p/ o cofre existente). Se sair 0, o unlock por
+# stdin nao valida nada aqui (e a senha do usuario e inocentada). So chamado
+# no caminho de falha Locked.
+function Test-WslUnlockExitMeaningful([string]$LinuxUser, [string]$Uid) {
+  $probe = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote 'ubuntugui-sonda-falsa-000' -Uid $Uid
+  return ($probe.UnlockCode -ne 0)
+}
+
 # Detalhe so p/ falha Locked: a colecao LOGIN esta trancada ou o DEFAULT aponta
 # p/ outra colecao? Quais arquivos existem, quantos daemons rodam. So leitura,
 # so chamado no caminho de falha (custo zero no sucesso). Se o caminho da
@@ -973,7 +984,11 @@ if ($uk.State -ne 'Unlocked') {
     throw "Cofre bloqueado"
   } else {
     $lockDetail = Get-WslKeyringLockDetail -LinuxUser $LinuxUser -Uid $Uid
-    Fail "Cofre segue trancado apos o unlock (unlock saiu $($uk2.UnlockCode); unlock disse: $($uk2.UnlockText); $lockDetail) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo. Se a senha estiver CERTA: abra Senhas e chaves (seahorse), destrave 'login' uma vez, mantenha aberto e rode de novo"
+    if (Test-WslUnlockExitMeaningful -LinuxUser $LinuxUser -Uid $Uid) {
+      Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo com UMA senha definitiva"
+    } else {
+      Fail "Unlock por stdin nao valida senha neste sistema (teste de controle com senha falsa tambem saiu 0; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha aberto e rode de novo"
+    }
     throw "Cofre bloqueado"
   }
 }
