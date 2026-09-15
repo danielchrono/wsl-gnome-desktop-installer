@@ -33,7 +33,8 @@ const HAS_ICON_LOCATION: u32 = 0x0000_0040;
 pub const SHOW_MIN_NO_ACTIVE: u32 = 7;
 
 /// Campos do atalho (mesmos do fluxo `WScript.Shell`: alvo, pasta de
-/// trabalho, icone `path,0`, descricao, janela minimizada sem foco).
+/// trabalho, icone (path puro, sem `,0`: o mslnk grava literal e o Windows
+/// lia `ico,0,0`), descricao, janela minimizada sem foco).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortcutSpec {
     pub target: String,
@@ -156,7 +157,7 @@ mod tests {
         ShortcutSpec::new(
             r"C:\App\Ubuntu-GUI.cmd",
             r"C:\App",
-            r"C:\Icons\ubuntu.ico,0",
+            r"C:\Icons\ubuntu.ico",
             "Abre o desktop GNOME do Ubuntu (WSL) via RDP",
         )
     }
@@ -184,7 +185,7 @@ mod tests {
         for needle in [
             r"C:\App\Ubuntu-GUI.cmd".as_bytes(),
             r"C:\App".as_bytes(),
-            r"C:\Icons\ubuntu.ico,0".as_bytes(),
+            r"C:\Icons\ubuntu.ico".as_bytes(),
             "Abre o desktop GNOME".as_bytes(),
         ] {
             assert!(

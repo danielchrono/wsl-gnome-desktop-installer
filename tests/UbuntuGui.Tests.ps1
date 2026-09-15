@@ -163,18 +163,22 @@ Describe 'Test-MissingCollectionOutput' {
 }
 
 Describe 'Test-ValidIco' {
-  It 'aceita header ico e rejeita lixo (fail-closed)' {
+  It 'aceita ico completo e rejeita truncado/lixo (fail-closed)' {
     (& (Get-Module UbuntuGui) {
       $d = Join-Path $env:TEMP ('ubuntugui-ico-' + [Guid]::NewGuid().ToString('N'))
       New-Item -ItemType Directory -Path $d -Force | Out-Null
       try {
-        $ok = Join-Path $d 'ok.ico'; $bad = Join-Path $d 'bad.ico'; $short = Join-Path $d 'short.ico'
-        [IO.File]::WriteAllBytes($ok, [byte[]](0,0,1,0,1,0))
+        $ok = Join-Path $d 'ok.ico'; $trunc = Join-Path $d 'trunc.ico'; $bad = Join-Path $d 'bad.ico'; $short = Join-Path $d 'short.ico'
+        $head = [byte[]](0,0,1,0,1,0)
+        $ent = [byte[]](32,32,0,0,1,0,32,0,4,0,0,0,22,0,0,0)
+        $dat = [byte[]](0xAA,0xBB,0xCC,0xDD)
+        [IO.File]::WriteAllBytes($ok, $head + $ent + $dat)
+        [IO.File]::WriteAllBytes($trunc, $head)
         [IO.File]::WriteAllBytes($bad, [byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A))
         [IO.File]::WriteAllBytes($short, [byte[]](0,0,1,0))
-        @((Test-ValidIco -Path $ok), (Test-ValidIco -Path $bad), (Test-ValidIco -Path $short), (Test-ValidIco -Path (Join-Path $d 'falta.ico'))) -join ','
+        @((Test-ValidIco -Path $ok), (Test-ValidIco -Path $trunc), (Test-ValidIco -Path $bad), (Test-ValidIco -Path $short), (Test-ValidIco -Path (Join-Path $d 'falta.ico'))) -join ','
       } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
-    }) | Should Be 'True,False,False,False'
+    }) | Should Be 'True,False,False,False,False'
   }
 }
 

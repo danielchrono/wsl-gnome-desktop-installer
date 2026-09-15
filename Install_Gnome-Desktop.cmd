@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "ed02d9a81371"
+$SCRIPT_BUILD = "3dccd2a6b144"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -56,6 +56,8 @@ $script:UbuntuGuiDefaults = @{
   GuiPackage           = 'ubuntu-desktop-minimal'
   FallbackResolution   = '1600x900'
   RdpPort              = 3390    # longe da 3389 (erro 0x708 no loopback); ainda permite sobrescrita via parametro
+  RdpFallbackPort        = 3391    # primeira alternativa quando a padrao esta ocupada
+  RdpScanExtra         = 8       # portas extras varridas apos o fallback (fallback..fallback+extra)
   AppName              = 'Ubuntu-GUI'
   IconUrl              = 'https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512'
   MstscSetupUrl64      = 'https://go.microsoft.com/fwlink/?linkid=2247659'   # mstsc 64-bit (doc MS: desinstalavel desde 23H2)
@@ -490,13 +492,25 @@ function Test-PasswordConfirmation {
   if ([string]::IsNullOrEmpty($First)) { return $false }
   return ($First -ceq $Second)
 }
-# Valida o header do .ico (magic 00 00 01 00 + count >= 1): arquivo
-# corrompido (PNG renomeado, download falho, 0 bytes) passa no Test-Path
-# e deixa o .lnk sem imagem - o passo 6 refaz nesses casos.
+# Valida o .ico inteiro (header + tabela de entradas + dados): header sozinho
+# (download truncado) passava e deixava o .lnk sem imagem - o passo 6 refaz
+# nesses casos e o atalho so aponta para o .ico quando ele passa aqui.
 function Test-ValidIco([string]$Path) {
   try {
     $b = [IO.File]::ReadAllBytes($Path)
-    return ($b.Length -ge 6 -and $b[0] -eq 0 -and $b[1] -eq 0 -and ([BitConverter]::ToUInt16($b, 2) -eq 1) -and ([BitConverter]::ToUInt16($b, 4) -ge 1))
+    if ($b.Length -lt 6 -or $b[0] -ne 0 -or $b[1] -ne 0) { return $false }
+    if ([BitConverter]::ToUInt16($b, 2) -ne 1) { return $false }
+    $count = [BitConverter]::ToUInt16($b, 4)
+    if ($count -lt 1 -or $count -gt 255) { return $false }
+    if ($b.Length -lt 6 + $count * 16) { return $false }
+    for ($i = 0; $i -lt $count; $i++) {
+      $o = 6 + $i * 16
+      $size = [BitConverter]::ToUInt32($b, $o + 8)
+      $off = [BitConverter]::ToUInt32($b, $o + 12)
+      if ($size -lt 1) { return $false }
+      if (($off + $size) -gt $b.Length) { return $false }
+    }
+    return $true
   } catch { return $false }
 }
 # View TUI nativa (MVVM): so render + leitura de tecla, sem decisao de instalacao.
@@ -872,10 +886,22 @@ $RebootDelaySec  = $D.RebootDelaySec
 $TlsDays         = $D.TlsCertDays
 $PublisherSubject = $D.PublisherSubject
 $ShellService    = $D.ShellService
-# Porta ocupada cai no fallback (nunca 3389: loopback dela e do host, 0x708).
-if (-not (Test-NetConnection -ComputerName '127.0.0.1' -Port $RDP_PORT -InformationLevel Quiet)) {
-    Warn "Porta $RDP_PORT indisponivel; usando porta alternativa 3391"
-    $RDP_PORT = 3391
+# Varredura [pedida, fallback, fallback+1, ...]: o teste anterior estava
+# invertido (-not caia no fallback com a porta LIVRE, queimando uma por
+# rerun) e o probe de loopback nao distingue "nosso RDP" de invasor
+# (mirrored expoe o convidado no 127.0.0.1 do host). O reuso do proprio RDP
+# vem no passo 5 (precisa do WSL). Nunca 3389 como padrao (0x708).
+$RdpWanted = $RDP_PORT
+$RdpCandidates = @($RdpWanted) + ($D.RdpFallbackPort..($D.RdpFallbackPort + $D.RdpScanExtra) | Where-Object { $_ -ne $RdpWanted })
+$RDP_PORT = $RdpCandidates[-1]
+foreach ($p in $RdpCandidates) {
+  try { $busy = Test-NetConnection -ComputerName '127.0.0.1' -Port $p -InformationLevel Quiet }
+  catch { $busy = $false }
+  if (-not $busy) { $RDP_PORT = $p; break }
+}
+if ($RDP_PORT -ne $RdpWanted) {
+  $nativeNote = if ($RdpWanted -eq 3389) { " (Windows RDP nativo?)" } else { "" }
+  Warn "Porta $RdpWanted ocupada$nativeNote; usando $RDP_PORT como alternativa (ou passe -RdpPort para forcar outra)"
 }
 $ShellBinary     = $D.ShellBinary
 $ShellRestartSec = $D.ShellRestartSec
@@ -1322,6 +1348,13 @@ if (-not $stored) {
   throw "Credencial nao gravada"
 }
 Ok "Credencial RDP gravada"
+# O ocupante pode ser o nosso proprio RDP (mirrored expoe o convidado no
+# loopback do host): confirma no convidado e reaproveita a pedida em vez de
+# queimar uma porta nova a cada rerun.
+if (($RDP_PORT -ne $RdpWanted) -and (Test-WslRdpListening -LinuxUser $LinuxUser -Service $RdpService -Port $RdpWanted)) {
+  $RDP_PORT = $RdpWanted
+  Ok "Porta $RDP_PORT reaproveitada (nosso RDP ja escuta nela)"
+}
 # Porta fora da 3389 (erro 0x708 no loopback): idempotente, migra quem instalou na 3389.
 Write-Host "  Aplicando TLS/porta $RDP_PORT e reiniciando o servico..." -ForegroundColor Yellow
 Invoke-Wsl $LinuxUser "grdctl rdp set-tls-cert $TlsCertPath 2>/dev/null; grdctl rdp set-tls-key $TlsKeyPath 2>/dev/null; grdctl rdp set-port $RDP_PORT 2>/dev/null; grdctl rdp disable-view-only 2>/dev/null; grdctl rdp enable 2>/dev/null; systemctl --user enable $RdpService 2>/dev/null; systemctl --user restart $RdpService 2>&1 | tail -n 1" | Out-Null
@@ -1501,7 +1534,7 @@ try {
   $rdpBytes = [IO.File]::ReadAllBytes($RdpPath)
   $rdpSigned = ([Text.Encoding]::UTF8.GetString($rdpBytes) -match 'signature:s:') -or ([Text.Encoding]::Unicode.GetString($rdpBytes) -match 'signature:s:')
 } catch { $rdpSigned = $false }
-if ($rdpSigned) { Ok "RDP assinado (sem aviso de fornecedor)" }
+if ($rdpSigned) { Ok "RDP assinado (sem aviso de fornecedor) [$($pubCert.Thumbprint.Substring(0,8))]" }
 else { Warn "Assinatura do .rdp falhou - o aviso de fornecedor pode continuar" }
 
 # Acesso Controlado a Pastas (Defender) pode bloquear a gravacao no Desktop:
@@ -1528,8 +1561,9 @@ if ($cfaMode -eq 1) {
     }
   }
 }
-# .lnk no Desktop + Iniciar, com o icone (fallback: icone do mstsc)
-$icoSpec = if (Test-Path $IcoPath) { "$IcoPath,0" } else { "C:\Windows\System32\mstsc.exe,0" }
+# .lnk no Desktop + Iniciar, com o icone valido (corrompido que existe tambem
+# nascia o atalho sem imagem: fallback para o icone do mstsc).
+$icoSpec = if (Test-ValidIco -Path $IcoPath) { "$IcoPath,0" } else { "C:\Windows\System32\mstsc.exe,0" }
 $ws = New-Object -ComObject WScript.Shell
 foreach ($lnk in @($DeskLnk, $StartLnk)) {
   $s = $ws.CreateShortcut($lnk)
@@ -1542,6 +1576,14 @@ foreach ($lnk in @($DeskLnk, $StartLnk)) {
 }
 if ((Test-Path $DeskLnk) -and (Test-Path $StartLnk)) { Ok "Atalhos no Desktop e no Iniciar" }
 else { Warn "Atalhos incompletos (rode de novo p/ recriar) - o Ubuntu-GUI.cmd em $ProgDir funciona" }
+# Nada mais toca no .rdp depois da assinatura: se o marcador sumiu aqui,
+# algo reescreveu o arquivo no meio do passo 6 (e o mstsc vai acusar
+# fornecedor desconhecido mesmo com o "assinado" acima).
+try {
+  $rdpFinal = [IO.File]::ReadAllBytes($RdpPath)
+  $stillSigned = ([Text.Encoding]::UTF8.GetString($rdpFinal) -match 'signature:s:') -or ([Text.Encoding]::Unicode.GetString($rdpFinal) -match 'signature:s:')
+} catch { $stillSigned = $false }
+if (-not $stillSigned) { Warn "Assinatura sumiu apos gravar atalhos - o aviso de fornecedor pode continuar" }
 
 # ============================== 7. VERIFICACAO ==============================
 Step "7/7 Verificacao ponta a ponta"

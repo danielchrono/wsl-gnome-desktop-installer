@@ -19,6 +19,10 @@ pub struct UbuntuGuiDefaults {
     /// SSOT: elimina magic numbers espalhados no codigo (FP: sem literal
     /// duplicado; ViewModel decide a politica, orquestrador apenas chama).
     pub rdp_fallback_port: u16,
+    /// Portas extras varridas apos o fallback (`fallback..fallback+extra`).
+    /// Um fallback unico queimava uma porta por rerun (o probe via o proprio
+    /// RDP anterior no loopback); a varredura estabiliza em reruns.
+    pub rdp_scan_extra: u16,
     pub app_name: String,
     pub icon_url: String,
     pub min_build_mirrored: u32,
@@ -55,9 +59,10 @@ pub fn defaults() -> UbuntuGuiDefaults {
         distro: "Ubuntu".to_string(),
         gui_package: "ubuntu-desktop-minimal".to_string(),
         fallback_resolution: "1600x900".to_string(),
-        // Longe da 3389 (0x708 no loopback); fallback para 3391 se ocupada.
+        // Longe da 3389 (0x708 no loopback); varre 3391+ se ocupada.
         rdp_port: 3390,
         rdp_fallback_port: 3391,
+        rdp_scan_extra: 8,
         app_name: "Ubuntu-GUI".to_string(),
         icon_url: "https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512".to_string(),
         // Win11 22H2+: mirrored networking.
@@ -105,6 +110,7 @@ mod tests {
         // 3390: longe da 3389 do host (0x708 no loopback).
         assert_eq!(d.rdp_port, 3390);
         assert_eq!(d.rdp_fallback_port, 3391);
+        assert_eq!(d.rdp_scan_extra, 8);
         // Fallback deve ser diferente da porta preferida
         assert_ne!(d.rdp_port, d.rdp_fallback_port);
     }

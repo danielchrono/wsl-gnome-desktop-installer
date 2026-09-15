@@ -59,13 +59,87 @@ pub fn is_port_in_use(_host: &str, _port: u16, _timeout_ms: u64) -> bool {
 /// O chamador e responsavel por emitir o `Warn` quando `fell_back == true`
 /// (FP: sem efeito colateral aqui; a mensagem pertence ao orquestrador).
 pub fn choose_rdp_port(requested: u16, fallback: u16, timeout_ms: u64) -> PortChoice {
-    let in_use = is_port_in_use("127.0.0.1", requested, timeout_ms);
+    select_first_free(requested, &[requested, fallback], &|p| {
+        is_port_in_use("127.0.0.1", p, timeout_ms)
+    })
+}
+
+/// Primeira livre na ordem dos candidatos (puro, testavel sem rede).
+///
+/// `candidates[0]` deve ser a porta pedida; as demais, fallbacks em ordem.
+/// O probe (`is_in_use`) e injetado para os testes nao dependerem de socket;
+/// em producao e `is_port_in_use("127.0.0.1", p, timeout)`.
+/// Tudo ocupado = ultimo candidato (o chamador valida e falha com diagnostico).
+pub fn select_first_free(
+    requested: u16,
+    candidates: &[u16],
+    is_in_use: &dyn Fn(u16) -> bool,
+) -> PortChoice {
+    let fallback = candidates
+        .iter()
+        .copied()
+        .find(|&c| c != requested)
+        .unwrap_or(requested);
+    if !is_in_use(requested) {
+        return PortChoice {
+            port: requested,
+            fell_back: false,
+            requested,
+            fallback,
+        };
+    }
+    for &c in candidates {
+        if c != requested && !is_in_use(c) {
+            return PortChoice {
+                port: c,
+                fell_back: true,
+                requested,
+                fallback,
+            };
+        }
+    }
+    let last = candidates.iter().copied().last().unwrap_or(requested);
     PortChoice {
-        port: if in_use { fallback } else { requested },
-        fell_back: in_use,
+        port: if last == requested { fallback } else { last },
+        fell_back: true,
         requested,
         fallback,
     }
+}
+
+/// Reaproveita a porta pedida quando o ocupante e o nosso proprio RDP.
+///
+/// O probe de loopback nao distingue "nosso RDP" (mirrored expoe o convidado
+/// no 127.0.0.1 do host) de invasor: sem isso cada rerun saltava de porta.
+/// O orquestrador confirma no convidado (`ss` + servico ativo) e so entao
+/// volta para a pedida.
+pub fn should_reuse_requested(fell_back: bool, guest_listening_on_requested: bool) -> bool {
+    fell_back && guest_listening_on_requested
+}
+
+/// Varredura `[requested, fallback, fallback+1, ...]`: um fallback unico
+/// queimava uma porta por rerun — o probe de loopback via o proprio RDP da
+/// execucao anterior (mirrored expoe o convidado no 127.0.0.1 do host) e
+/// saltava de novo a cada vez.
+pub fn choose_rdp_port_scan(
+    requested: u16,
+    fallback: u16,
+    extra: u16,
+    timeout_ms: u64,
+) -> PortChoice {
+    let mut candidates = vec![requested];
+    for i in 0..extra {
+        let p = fallback.saturating_add(i);
+        if p != requested {
+            candidates.push(p);
+        }
+    }
+    if candidates.len() == 1 {
+        candidates.push(fallback);
+    }
+    select_first_free(requested, &candidates, &|p| {
+        is_port_in_use("127.0.0.1", p, timeout_ms)
+    })
 }
 
 /// Suprime o warning de `Duration` importada mas nunca usada fora do `cfg(windows)`.
@@ -139,5 +213,44 @@ mod tests {
         assert_eq!(c.fallback, 3390);
         // `port` e sempre um dos dois
         assert!(c.port == 3389 || c.port == 3390);
+    }
+
+    #[test]
+    fn scan_keeps_requested_when_free() {
+        let c = select_first_free(3390, &[3390, 3391, 3392], &|_| false);
+        assert_eq!(c.port, 3390);
+        assert!(!c.fell_back);
+        assert_eq!((c.requested, c.fallback), (3390, 3391));
+    }
+
+    #[test]
+    fn scan_takes_first_free_fallback() {
+        // 3390 e 3391 ocupadas: cai na 3392, nao queima so uma por vez.
+        let busy = |p: u16| p == 3390 || p == 3391;
+        let c = select_first_free(3390, &[3390, 3391, 3392], &busy);
+        assert_eq!(c.port, 3392);
+        assert!(c.fell_back);
+        assert_eq!((c.requested, c.fallback), (3390, 3391));
+    }
+
+    #[test]
+    fn reuse_only_when_fell_back_and_guest_owns_port() {
+        assert!(should_reuse_requested(true, true));
+        assert!(!should_reuse_requested(true, false));
+        assert!(!should_reuse_requested(false, true));
+        assert!(!should_reuse_requested(false, false));
+    }
+
+    #[test]
+    fn scan_probes_in_candidate_order() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let c = select_first_free(3390, &[3390, 3391, 3392], &|p| {
+            seen.borrow_mut().push(p);
+            true
+        });
+        assert_eq!(*seen.borrow(), vec![3390, 3391, 3392]);
+        // Tudo ocupado: fica no ultimo (o chamador valida e falha).
+        assert_eq!(c.port, 3392);
+        assert!(c.fell_back);
     }
 }

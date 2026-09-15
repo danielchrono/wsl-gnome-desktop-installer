@@ -123,6 +123,85 @@ pub fn ensure_publisher_certificate(subject: &str, years: u32) -> Result<String,
     )))
 }
 
+/// Resultado da confianca no TLS (para a mensagem do passo 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsTrust {
+    Added,
+    AlreadyPresent,
+}
+
+/// Importa o cert TLS do RDP para `CurrentUser\Root` (idempotente por
+/// thumbprint): some o aviso de "computador remoto desconhecido".
+/// Recebe o PEM (multi-linha nao atravessa o argv: vai em base64, como o
+/// transporte do `helper`). Imprime `UBUNTUGUI_TLS=ADDED|PRESENT`; sem CRLF.
+pub fn tls_trust_script(pem: &str) -> String {
+    const TEMPLATE: &str = "$b='PEM_B64';$raw=[Convert]::FromBase64String($b);$c=New-Object Security.Cryptography.X509Certificates.X509Certificate2(,$raw);$s=New-Object Security.Cryptography.X509Certificates.X509Store('Root','CurrentUser');$s.Open('ReadWrite');$known=@($s.Certificates|Where-Object { $_.Thumbprint -eq $c.Thumbprint }).Count -gt 0;if(-not $known){$s.Add($c);$m='ADDED'}else{$m='PRESENT'};$s.Close();'UBUNTUGUI_TLS='+$m";
+    TEMPLATE.replace(
+        "PEM_B64",
+        &crate::helper::base64_encode(pem.as_bytes()),
+    )
+}
+
+/// Parser fail-closed do marcador (`ADDED` = importou agora;
+/// `PRESENT` = ja confiavel).
+pub fn parse_tls_trust_output(out: &str) -> Option<TlsTrust> {
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("UBUNTUGUI_TLS=") {
+            match rest.trim() {
+                "ADDED" => return Some(TlsTrust::Added),
+                "PRESENT" => return Some(TlsTrust::AlreadyPresent),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Garante o TLS confiavel (Windows): importa o PEM para `CurrentUser\Root`
+/// quando o thumbprint ainda nao esta la. Idempotente; nunca fatal sozinho
+/// (o chamador degrada para Warn e o .rdp continua abrindo com aviso).
+#[cfg(windows)]
+pub fn ensure_tls_trusted(pem: &str) -> Result<TlsTrust, InstallError> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW = 0x08000000: sem flash de console (como `wsl_cmd`).
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = tls_trust_script(pem);
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script.as_str(),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(InstallError::from)?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Some(t) = parse_tls_trust_output(&stdout) {
+        return Ok(t);
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut tail: Vec<String> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if tail.len() > 3 {
+        tail = tail[tail.len() - 3..].to_vec();
+    }
+    if tail.is_empty() {
+        tail.push("(sem saida)".to_string());
+    }
+    Err(InstallError::CertFailed(format!(
+        "tls nao confiavel ({})",
+        tail.join(" | ")
+    )))
+}
+
 /// Script find-or-create do publicador (mesma primitiva do PS legado, numa
 /// unica chamada): reaproveita de `My` por Subject exato **com chave
 /// privada** ou cria CodeSigning autoassinado em `My` + `TrustedPublisher`.
@@ -224,6 +303,14 @@ pub fn ensure_publisher_certificate(_subject: &str, _years: u32) -> Result<Strin
     ))
 }
 
+/// Fora do Windows nao ha cert store: erro tipado no `ensure`.
+#[cfg(not(windows))]
+pub fn ensure_tls_trusted(_pem: &str) -> Result<TlsTrust, InstallError> {
+    Err(InstallError::NotSupportedOnLinux(
+        "cert store CurrentUser\\Root",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +351,44 @@ mod tests {
         assert!(s.contains("'TrustedPublisher'"));
         assert!(!s.contains("TrustedPublishers"));
         assert!(!s.contains('\r'), "CRLF quebraria o argv do powershell");
+    }
+
+    #[test]
+    fn tls_script_carries_b64_and_root_marker() {
+        let s = tls_trust_script("-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----\n");
+        // PEM vai em base64 (multi-linha nao atravessa o argv).
+        assert!(!s.contains("BEGIN CERTIFICATE"));
+        assert!(s.contains("FromBase64String"));
+        assert!(s.contains("'Root','CurrentUser'"));
+        assert!(s.contains("UBUNTUGUI_TLS="));
+        assert!(s.contains("ADDED"));
+        assert!(s.contains("PRESENT"));
+        assert!(!s.contains('\r'), "CRLF quebraria o argv do powershell");
+        assert!(!s.contains('"'), "aspas duplas nao atravessam o argv do wsl/powershell");
+    }
+
+    #[test]
+    fn tls_marker_parses_and_rejects_garbage() {
+        assert_eq!(
+            parse_tls_trust_output("ok\nUBUNTUGUI_TLS=ADDED\n"),
+            Some(TlsTrust::Added)
+        );
+        assert_eq!(
+            parse_tls_trust_output("UBUNTUGUI_TLS=PRESENT"),
+            Some(TlsTrust::AlreadyPresent)
+        );
+        assert_eq!(parse_tls_trust_output("UBUNTUGUI_TLS=MAYBE"), None);
+        assert_eq!(parse_tls_trust_output("nada aqui"), None);
+        assert_eq!(parse_tls_trust_output(""), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn tls_ensure_is_typed_off_windows() {
+        assert!(matches!(
+            ensure_tls_trusted("pem"),
+            Err(InstallError::NotSupportedOnLinux(_))
+        ));
     }
 
     #[test]

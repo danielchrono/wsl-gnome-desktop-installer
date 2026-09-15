@@ -218,16 +218,37 @@ pub fn icon_sizes_arg(icon_sizes: &[u32]) -> String {
         .join(",")
 }
 
-/// Header `.ico` valido: reservado `00 00` + tipo `01 00` (icone) +
-/// count >= 1. Um `ubuntu.ico` corrompido (PNG renomeado, download falho,
-/// 0 bytes) passa no `exists()` e deixa o `.lnk` sem icone — por isso o
-/// passo 6 valida o conteudo, nao so a existencia.
-pub fn is_valid_ico_bytes(head: &[u8]) -> bool {
-    head.len() >= 6
-        && head[0] == 0
-        && head[1] == 0
-        && u16::from_le_bytes([head[2], head[3]]) == 1
-        && u16::from_le_bytes([head[4], head[5]]) >= 1
+/// `.ico` valido: header (`00 00` + tipo `01 00`) + tabela de `count`
+/// entradas de 16 bytes, cada uma com tamanho > 0 e dados dentro do arquivo.
+/// So o header nao basta: um download truncado tem header valido e deixa o
+/// `.lnk` sem imagem — o passo 6 refaz nesses casos e o atalho so aponta
+/// para o `.ico` quando ele passa aqui.
+pub fn is_valid_ico_bytes(b: &[u8]) -> bool {
+    if b.len() < 6 || b[0] != 0 || b[1] != 0 {
+        return false;
+    }
+    if u16::from_le_bytes([b[2], b[3]]) != 1 {
+        return false;
+    }
+    let count = u16::from_le_bytes([b[4], b[5]]) as usize;
+    if count == 0 || count > 255 {
+        return false;
+    }
+    if b.len() < 6 + count * 16 {
+        return false;
+    }
+    for i in 0..count {
+        let e = &b[6 + i * 16..6 + (i + 1) * 16];
+        let size = u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as usize;
+        let off = u32::from_le_bytes([e[12], e[13], e[14], e[15]]) as usize;
+        if size == 0 {
+            return false;
+        }
+        if off.checked_add(size).map(|end| end > b.len()).unwrap_or(true) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Valida o `.ico` no disco (ausente ou corrompido = refaz no passo 6).
@@ -235,6 +256,17 @@ pub fn is_valid_ico_file(path: &std::path::Path) -> bool {
     std::fs::read(path)
         .map(|b| is_valid_ico_bytes(&b))
         .unwrap_or(false)
+}
+
+/// Icone do atalho: path puro quando o `.ico` e valido, senao o do mstsc.
+/// Sem `,0` literal: o mslnk grava o IconLocation como esta e o Windows lia
+/// `ico,0,0` (indice duplicado = arquivo inexistente = sem imagem).
+pub fn shortcut_icon_spec(ico_valid: bool, ico_path: &str) -> String {
+    if ico_valid {
+        ico_path.to_string()
+    } else {
+        r"C:\Windows\System32\mstsc.exe".to_string()
+    }
 }
 
 /// `curl` do icone oficial + conversao multi-tamanho via PIL no WSL.
@@ -441,11 +473,17 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         .fallback_resolution
         .clone()
         .unwrap_or(d.fallback_resolution.clone());
-    // ViewModel puro decide a porta (net::choose_rdp_port); orquestrador
-    // emite o Warn se houve fallback (FP: sem efeito colateral no ViewModel).
+    // ViewModel puro decide a porta (varredura net::choose_rdp_port_scan);
+    // orquestrador emite o Warn se houve fallback (FP: sem efeito colateral
+    // no ViewModel). O reuso do proprio RDP vem no passo 5 (precisa do WSL).
     let requested_port = opts.rdp_port.unwrap_or(d.rdp_port);
-    let port_choice = crate::net::choose_rdp_port(requested_port, d.rdp_fallback_port, 1500);
-    let rdp_port = port_choice.port;
+    let port_choice = crate::net::choose_rdp_port_scan(
+        requested_port,
+        d.rdp_fallback_port,
+        d.rdp_scan_extra,
+        1500,
+    );
+    let mut rdp_port = port_choice.port;
     let app_name = opts.app_name.clone().unwrap_or(d.app_name.clone());
     // Nao assistido implica sem TUI (cinto + suspensorio: os prompts sao
     // pulados por `opts.unattended` mesmo assim).
@@ -458,9 +496,15 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     rep.step("Pre-checagens (Windows, rede, WSL)");
     // Porta RDP: ViewModel ja decidiu; orquestrador emite o aviso se necessario.
     if port_choice.fell_back {
+        // "Nativo" so faz sentido na 3389 (porta oficial do RDP do host).
+        let native = if port_choice.requested == 3389 {
+            " (Windows RDP nativo?)"
+        } else {
+            ""
+        };
         rep.warn(&format!(
-            "Porta {} ocupada (Windows RDP nativo?); usando {} como alternativa (ou passe --rdp-port para forcar outra)",
-            port_choice.requested, port_choice.port
+            "Porta {} ocupada{}; usando {} como alternativa (ou passe --rdp-port para forcar outra)",
+            port_choice.requested, native, port_choice.port
         ));
     } else {
         rep.ok(&format!("Porta RDP: {rdp_port}"));
@@ -1119,6 +1163,19 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         return Err(InstallError::CredentialNotStored);
     }
     rep.ok("Credencial RDP gravada");
+    // O ocupante pode ser o nosso proprio RDP (mirrored expoe o convidado no
+    // loopback do host): confirma no convidado e reaproveita a pedida em vez
+    // de queimar uma porta nova a cada rerun.
+    if crate::net::should_reuse_requested(
+        port_choice.fell_back,
+        health::test_rdp_listening(&linux_user, &d.rdp_service, port_choice.requested)
+            .unwrap_or(false),
+    ) {
+        rdp_port = port_choice.requested;
+        rep.ok(&format!(
+            "Porta {rdp_port} reaproveitada (nosso RDP ja escuta nela)"
+        ));
+    }
     rep.say(&format!(
         "  Aplicando TLS/porta {rdp_port} e reiniciando o servico..."
     ));
@@ -1133,6 +1190,28 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     } else {
         rep.fail("RDP nao subiu".to_string());
         return Err(InstallError::RdpDown);
+    }
+    // Confia no cert TLS autoassinado (gerado por nos p/ este endpoint): some
+    // o aviso de "computador remoto desconhecido". So CurrentUser (sem admin).
+    // O PowerShell ja fazia; o port Rust nunca trouxe — dai o aviso mesmo com
+    // o .rdp assinado (a assinatura cobre o ARQUIVO, nao a identidade do host).
+    match wsl_cmd::invoke_wsl(
+        Some(&distro),
+        &linux_user,
+        &format!("cat {} 2>/dev/null", d.tls_cert_path),
+    ) {
+        Ok(r) if r.out.contains("BEGIN CERTIFICATE") => {
+            match crate::cert::ensure_tls_trusted(&r.out) {
+                Ok(crate::cert::TlsTrust::Added) => {
+                    rep.ok("Cert TLS confiavel (sem aviso de rede nao confiavel)")
+                }
+                Ok(crate::cert::TlsTrust::AlreadyPresent) => rep.ok("Cert TLS ja confiavel"),
+                Err(e) => rep.warn(&format!(
+                    "Cert TLS nao importado (aviso de rede pode continuar): {e}"
+                )),
+            }
+        }
+        _ => rep.warn("Cert TLS nao lido no convidado (aviso de rede pode continuar)"),
     }
 
     // ---- 6. icone + atalhos ----------------------------------------------------------
@@ -1227,15 +1306,20 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         return Err(InstallError::RdpNotCreated);
     }
     if rdp::sign_rdp_file(&rdp_path, &pub_cert_tp) {
-        rep.ok("RDP assinado (sem aviso de fornecedor)");
+        let short = pub_cert_tp.get(..8).unwrap_or(pub_cert_tp.as_str());
+        rep.ok(&format!(
+            "RDP assinado (sem aviso de fornecedor) [{short}]"
+        ));
     } else {
         rep.warn("Assinatura do .rdp falhou - o aviso de fornecedor pode continuar");
     }
-    let ico_spec = if ico_path.exists() {
-        format!("{},0", ico_path.display())
-    } else {
-        r"C:\Windows\System32\mstsc.exe,0".to_string()
-    };
+    // Atalho aponta para o .ico so quando ele e valido de verdade: apontar
+    // para um arquivo corrompido (que existe) nascia o .lnk sem imagem.
+    // O ",0" continua correto no PS (o WScript separa path/indice sozinho).
+    let ico_spec = shortcut_icon_spec(
+        is_valid_ico_file(&ico_path),
+        &ico_path.display().to_string(),
+    );
     let desktop = desktop_dir().join(format!("{app_name}.lnk"));
     let start = programs_menu_dir().join(format!("{app_name}.lnk"));
     let mut links_ok = true;
@@ -1250,6 +1334,15 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     } else {
         rep.fail("Atalhos nao criados".to_string());
         return Err(InstallError::ShortcutsMissing);
+    }
+    // Nada mais toca no .rdp depois da assinatura: se o marcador sumiu aqui,
+    // algo reescreveu o arquivo no meio do passo 6 (e o mstsc vai acusar
+    // fornecedor desconhecido mesmo com o "assinado" acima).
+    let still_signed = std::fs::read(&rdp_path)
+        .map(|b| rdp::rdp_has_signature(&b))
+        .unwrap_or(false);
+    if !still_signed {
+        rep.warn("Assinatura sumiu apos gravar atalhos - o aviso de fornecedor pode continuar");
     }
 
     // ---- 7. verificacao ----------------------------------------------------------
@@ -1696,10 +1789,39 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_icon_is_bare_path_for_mslnk() {
+        // Contrato com o mslnk (provado no Windows): IconLocation literal,
+        // sem ",0" — com sufixo o Windows lia "ico,0,0" e nascia sem imagem.
+        assert_eq!(
+            shortcut_icon_spec(true, r"C:\I\ubuntu.ico"),
+            r"C:\I\ubuntu.ico"
+        );
+        assert!(!shortcut_icon_spec(true, r"C:\I\ubuntu.ico").contains(','));
+        assert_eq!(
+            shortcut_icon_spec(false, r"C:\I\ubuntu.ico"),
+            r"C:\Windows\System32\mstsc.exe"
+        );
+    }
+
+    #[test]
     fn ico_magic_accepts_real_header_rejects_garbage() {
-        // Header .ico minimo: 00 00 | 01 00 | count>=1.
-        assert!(is_valid_ico_bytes(&[0, 0, 1, 0, 1, 0]));
-        assert!(is_valid_ico_bytes(&[0, 0, 1, 0, 5, 0, 0xAA]));
+        // .ico minimo valido: header + 1 entrada + 4 bytes de imagem.
+        let mut ok = vec![0, 0, 1, 0, 1, 0];
+        ok.extend_from_slice(&[32, 32, 0, 0, 1, 0, 32, 0]);
+        ok.extend_from_slice(&4u32.to_le_bytes()); // size
+        ok.extend_from_slice(&22u32.to_le_bytes()); // offset
+        ok.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert!(is_valid_ico_bytes(&ok));
+        // Header sozinho (download truncado): refaz — era o "ja existia" sem imagem.
+        assert!(!is_valid_ico_bytes(&[0, 0, 1, 0, 1, 0]));
+        assert!(!is_valid_ico_bytes(&[0, 0, 1, 0, 5, 0, 0xAA]));
+        // Entrada com size 0 ou dados fora do arquivo: refaz.
+        let mut zero_size = ok.clone();
+        zero_size[14..18].copy_from_slice(&0u32.to_le_bytes());
+        assert!(!is_valid_ico_bytes(&zero_size));
+        let mut bad_off = ok.clone();
+        bad_off[18..22].copy_from_slice(&999u32.to_le_bytes());
+        assert!(!is_valid_ico_bytes(&bad_off));
         // PNG renomeado, vazio, curto e count 0: refaz.
         assert!(!is_valid_ico_bytes(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]));
         assert!(!is_valid_ico_bytes(&[]));
@@ -1751,7 +1873,7 @@ mod tests {
         build_shortcut_file(
             &target_cmd,
             &dir,
-            r"C:\Icons\ubuntu.ico,0",
+            r"C:\Icons\ubuntu.ico",
             &lnk,
         )
         .unwrap();
