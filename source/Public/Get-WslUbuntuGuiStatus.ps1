@@ -7,23 +7,27 @@ function Get-WslUbuntuGuiStatus {
 #>
 [CmdletBinding()]
 param(
-  [string]$Distro = "Ubuntu",
+  [string]$Distro,
   [Parameter(Mandatory)] [string]$LinuxUser,
-  [int]$RdpPort = 3390
+  [int]$RdpPort = 0
 )
+# (padroes em source/Private/UbuntuGui-Constants.ps1 - sem defaults aqui; ViewModel)
+$D = Get-UbuntuGuiDefaults
+foreach ($n in @('Distro', 'RdpPort')) {
+  if (-not $PSBoundParameters.ContainsKey($n)) { Set-Variable $n $D[$n] }
+}
 $DISTRO = $Distro
 $RDP_PORT = $RdpPort
-$D = $script:UbuntuGuiDefaults
-$shell = (Invoke-Wsl $LinuxUser "systemctl --user is-active $($D.ShellService)").Out.Trim()
-$rdp = Invoke-Wsl $LinuxUser "systemctl --user is-active $($D.RdpService) && ss -tlnp 2>/dev/null | grep -q ':$RDP_PORT' && echo OK || echo DOWN"
+$shellActive = Test-WslShellActive -LinuxUser $LinuxUser -Service $D.ShellService
+$rdpUp = Test-WslRdpListening -LinuxUser $LinuxUser -Service $D.RdpService -Port $RDP_PORT
 $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
 $credSet = Test-WslRdpCredential -LinuxUser $LinuxUser -Uid $Uid
 return [pscustomobject]@{
   Distro           = $Distro
   LinuxUser        = $LinuxUser
   RdpPort          = $RdpPort
-  ShellActive      = ($shell -eq 'active')
-  RdpListening     = ($rdp.Out -match 'OK')
+  ShellActive      = $shellActive
+  RdpListening     = $rdpUp
   CredentialsSet   = $credSet
 }
 }

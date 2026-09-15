@@ -84,6 +84,7 @@ $StartLnk  = Join-Path ([Environment]::GetFolderPath("Programs")) "$APP_NAME.lnk
 $LogFile   = Join-Path $env:TEMP "$APP_NAME-install.log"
 $ResumeFile = Join-Path $ProgDir "resume-state.json"
 $ResumePs1  = Join-Path $ProgDir "Install-UbuntuGUI.resume.ps1"
+$SavedUserFile = Join-Path $ProgDir "linux-user.txt"
 $RunOncePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 $RunOnceName = "UbuntuGUIResume"
 Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
@@ -132,7 +133,6 @@ if (-not $Resume) {
   # Usuario/senha Linux (reaproveita padrao Ubuntu: minusculas, sem espaco).
   # O nome fica salvo entre runs: na 1a instalacao ele sera o usuario criado pelo script
   # (nao precisa digitar no instalador do Ubuntu); nos reruns ele ja vem pronto.
-  $SavedUserFile = Join-Path $env:LOCALAPPDATA "Programs\$APP_NAME\linux-user.txt"
   if ([string]::IsNullOrWhiteSpace($LinuxUser)) {
     $savedRaw = if (Test-Path $SavedUserFile) { (Get-Content $SavedUserFile -Raw) } else { '' }
     $defUser = Get-DefaultLinuxUser -SavedUser $savedRaw -WindowsUser $env:USERNAME
@@ -155,15 +155,12 @@ if (-not $Resume) {
     Fail "Usuario '$LinuxUser' invalido (use minusculas, numeros, _ ou -)"; throw "Usuario Linux invalido"
   }
   if ($LinuxPassword) {
-    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringUni(
-      [Runtime.InteropServices.Marshal]::SecureStringToBSTR($LinuxPassword))
+    $LinuxPass = ConvertFrom-SecureStringPlain $LinuxPassword
   } else {
     $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
     $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
-    $LinuxPass = [Runtime.InteropServices.Marshal]::PtrToStringUni(
-      [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec1))
-    $LinuxPass2 = [Runtime.InteropServices.Marshal]::PtrToStringUni(
-      [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec2))
+    $LinuxPass = ConvertFrom-SecureStringPlain $sec1
+    $LinuxPass2 = ConvertFrom-SecureStringPlain $sec2
     if ($LinuxPass -cne $LinuxPass2 -or [string]::IsNullOrEmpty($LinuxPass)) {
       Fail "Senhas diferentes ou vazias - rode de novo"; throw "Senhas diferentes ou vazias"
     }
@@ -247,7 +244,7 @@ if ($UseMirrored) {
   }
   Ok "Mirrored networking (RDP fixo em 127.0.0.1)"
 } else {
-  $RdpHost = Get-FirstIpAddress (wsl -d $DISTRO -- hostname -I 2>$null)
+  $RdpHost = Get-WslIpAddress -Distro $DISTRO
   Ok "IP dinamico - cada clique detecta sozinho ($RdpHost)"
 }
 
@@ -269,7 +266,7 @@ if ($r.Out -match "MISSING") {
   else { Fail "Nao atualizei a senha: $($rp.Out)"; throw "Senha nao atualizada" }
 }
 if (-not (Test-Path $ProgDir)) { New-Item -ItemType Directory -Path $ProgDir -Force | Out-Null }
-[IO.File]::WriteAllText((Join-Path $ProgDir "linux-user.txt"), $LinuxUser)
+[IO.File]::WriteAllText($SavedUserFile, $LinuxUser)
 if ((Invoke-WslRoot "id -u $LinuxUser 2>/dev/null").Code -eq 0) { Ok "Usuario $LinuxUser pronto" }
 
 # wsl.conf com systemd + usuario padrao (exige 'wsl --shutdown' para valer)
@@ -352,8 +349,7 @@ if ($r.Out -match "STALE") {
   Invoke-Wsl $LinuxUser "systemctl --user restart $ShellService" | Out-Null
   Start-Sleep -Seconds $ShellWaitSec
 }
-$r = Invoke-Wsl $LinuxUser "systemctl --user is-active $ShellService"
-if ($r.Out -match "active") { Ok "GNOME Shell ativo em $RES" }
+if (Test-WslShellActive -LinuxUser $LinuxUser -Service $ShellService) { Ok "GNOME Shell ativo em $RES" }
 else { Fail "Shell nao subiu - journal: systemctl --user status gnome-shell-headless"; throw "Shell nao subiu" }
 Invoke-Wsl $LinuxUser "mkdir -p ~/Desktop" | Out-Null
 
@@ -419,8 +415,7 @@ Ok "Credencial RDP gravada"
 Write-Host "  Aplicando TLS/porta $RDP_PORT e reiniciando o servico..." -ForegroundColor Yellow
 Invoke-Wsl $LinuxUser "grdctl rdp set-tls-cert $TlsCertPath 2>/dev/null; grdctl rdp set-tls-key $TlsKeyPath 2>/dev/null; grdctl rdp set-port $RDP_PORT 2>/dev/null; grdctl rdp disable-view-only 2>/dev/null; grdctl rdp enable 2>/dev/null; systemctl --user enable $RdpService 2>/dev/null; systemctl --user restart $RdpService 2>&1 | tail -n 1" | Out-Null
 Start-Sleep -Seconds $RdpSettleSec
-$r = Invoke-Wsl $LinuxUser "systemctl --user is-active $RdpService && ss -tlnp 2>/dev/null | grep -q ':$RDP_PORT' && echo OK || echo DOWN"
-if ($r.Out -match "OK") { Ok "RDP ouvindo na porta $RDP_PORT" }
+if (Test-WslRdpListening -LinuxUser $LinuxUser -Service $RdpService -Port $RDP_PORT) { Ok "RDP ouvindo na porta $RDP_PORT" }
 else { Fail "RDP nao subiu"; throw "RDP nao subiu" }
 
 # ============================== 6. ICONE + ATALHOS ==============================
@@ -469,7 +464,7 @@ Add-Type -AssemblyName System.Security
 $blob = [Security.Cryptography.ProtectedData]::Protect(
   [Text.Encoding]::Unicode.GetBytes($LinuxPass), $null, 'CurrentUser')
 $hex = ($blob | ForEach-Object { $_.ToString('x2') }) -join ''
-if (-not $LocalhostLive) { $RdpHost = Get-FirstIpAddress (wsl -d $DISTRO -- hostname -I 2>$null) }
+if (-not $LocalhostLive) { $RdpHost = Get-WslIpAddress -Distro $DISTRO }
 $rdp = New-RdpFileContent -RdpHost $RdpHost -RdpPort $RDP_PORT -LinuxUser $LinuxUser -PasswordHex $hex -Resolution $RES
 [IO.File]::WriteAllLines($RdpPath, $rdp)
 if (Test-Path $RdpPath) { Ok "RDP com login automatico em $RdpPath" }
@@ -498,9 +493,9 @@ else { Fail "Atalhos nao criados"; throw "Atalhos nao criados" }
 # ============================== 7. VERIFICACAO ==============================
 Step "7/7 Verificacao ponta a ponta"
 $checks = @(
-  @{ N = "Shell headless ativo"; C = "systemctl --user is-active $ShellService"; Want = "active" },
+  @{ N = "Shell headless ativo"; C = (Get-WslShellActiveCommand -Service $ShellService); Want = "^active$" },
   @{ N = "Dock do Ubuntu ativo"; C = "gnome-extensions list --enabled 2>/dev/null | grep -q ubuntu-dock && echo YES || echo NO"; Want = "YES" },
-  @{ N = "RDP ouvindo :$RDP_PORT"; C = "ss -tlnp 2>/dev/null | grep -q ':$RDP_PORT' && echo YES || echo NO"; Want = "YES" }
+  @{ N = "RDP ouvindo :$RDP_PORT"; C = (Get-WslRdpListeningCommand -Service $RdpService -Port $RDP_PORT); Want = "OK" }
 )
 foreach ($t in $checks) {
   $r = Invoke-Wsl $LinuxUser $t.C
@@ -515,7 +510,7 @@ $LiveFailures = @(Get-UbuntuGuiFailures -State $FeedbackState)
 if ($LiveFailures.Count -eq 0) {
   Remove-Item $LogFile -Force -ErrorAction SilentlyContinue  # higiene: transcript guarda a senha
   Clear-ResumeState $RunOncePath $RunOnceName $ResumeFile $ResumePs1  # higiene: estado de retomada guarda a senha (DPAPI)
-  $ip = Get-FirstIpAddress (wsl -d $DISTRO -- hostname -I 2>$null)
+  $ip = Get-WslIpAddress -Distro $DISTRO
   if ($LocalhostLive) { $ip = '127.0.0.1' }
   Write-Host "TUDO PRONTO" -ForegroundColor Green
   Write-Host "  Desktop : duplo clique em $APP_NAME (ou mstsc em ${ip}:$RDP_PORT)"

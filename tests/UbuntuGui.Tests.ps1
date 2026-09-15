@@ -171,3 +171,62 @@ Describe 'Get-UbuntuGuiDefaults' {
     }) | Should Be 3390
   }
 }
+
+Describe 'ConvertFrom-SecureStringPlain' {
+  It 'round-trip preserva a senha' {
+    (& (Get-Module UbuntuGui) {
+      ConvertFrom-SecureStringPlain (ConvertTo-SecureString 's3nh@!' -AsPlainText -Force)
+    }) | Should Be 's3nh@!'
+  }
+  It 'nulo vira vazio' {
+    (& (Get-Module UbuntuGui) { ConvertFrom-SecureStringPlain $null }) | Should Be ''
+  }
+}
+
+Describe 'Test-WslServiceHealth' {
+  It 'comando do shell e exato' {
+    (& (Get-Module UbuntuGui) { Get-WslShellActiveCommand -Service 's.svc' }) | Should Be 'systemctl --user is-active s.svc'
+  }
+  It 'comando do RDP carrega servico e porta' {
+    (& (Get-Module UbuntuGui) { Get-WslRdpListeningCommand -Service 'r.svc' -Port 3390 }) | Should Be "systemctl --user is-active r.svc && ss -tlnp 2>/dev/null | grep -q ':3390' && echo OK || echo DOWN"
+  }
+  It 'shell exige active exato (inactive nao passa)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'active' } }
+        $a = Test-WslShellActive -LinuxUser 'u' -Service 's'
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'inactive' } }
+        $i = Test-WslShellActive -LinuxUser 'u' -Service 's'
+        @($a, $i) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'True,False'
+  }
+  It 'rdp exige OK (DOWN nao passa)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'OK' } }
+        $a = Test-WslRdpListening -LinuxUser 'u' -Service 's' -Port 3390
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'DOWN' } }
+        $i = Test-WslRdpListening -LinuxUser 'u' -Service 's' -Port 3390
+        @($a, $i) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'True,False'
+  }
+}
+
+Describe 'Get-WslIpAddress' {
+  It 'retorna o primeiro IP (mock do wsl)' {
+    (& (Get-Module UbuntuGui) {
+      $had = Test-Path function:wsl
+      $real = if ($had) { ${function:wsl} } else { $null }
+      try {
+        ${function:wsl} = { return '10.1.2.3 10.1.2.4 ' }
+        Get-WslIpAddress -Distro 'Ubuntu'
+      } finally {
+        if ($had) { ${function:wsl} = $real } else { Remove-Item function:wsl -ErrorAction SilentlyContinue }
+      }
+    }) | Should Be '10.1.2.3'
+  }
+}
