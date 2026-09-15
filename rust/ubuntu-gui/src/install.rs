@@ -1284,6 +1284,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     };
     let _ = endpoint_note;
     let cmd_path = prog_dir.join(format!("{app_name}.cmd"));
+    let (rdp_w, rdp_h) = launcher::rdp_window_size(&res);
     let cmd_text = launcher::new_launcher_content(
         &app_name,
         &distro,
@@ -1292,9 +1293,20 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         &pub_cert_tp,
         &disc_block,
         &rewrite_block,
+        rdp_w,
+        rdp_h,
     );
     std::fs::write(&cmd_path, cmd_text)?;
     rep.ok(&format!("Script em {}", cmd_path.display()));
+    // Helper que grava a credencial no Cofre do Windows: o launcher prefere
+    // `mstsc /v:` (sem arquivo aberto, sem aviso de fornecedor) e so volta
+    // ao `.rdp` quando o helper falha (paridade com o PS).
+    let cred_path = prog_dir.join(format!("{app_name}-Cred.ps1"));
+    if std::fs::write(&cred_path, launcher::CRED_HELPER_SCRIPT).is_ok() {
+        rep.ok("Login sem aviso via Cofre do Windows");
+    } else {
+        rep.warn("Helper de credencial nao criado (segue pelo .rdp)");
+    }
 
     let rdp_path = prog_dir.join(format!("{app_name}.rdp"));
     let hex = rdp::protect_password_hex(linux_pass.expose())?;

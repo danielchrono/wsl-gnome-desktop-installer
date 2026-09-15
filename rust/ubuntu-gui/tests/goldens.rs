@@ -41,6 +41,7 @@ fn launcher_blocks_golden() {
         3390,
         "ABC123",
         true,
+        "1600x900",
     );
     assert!(fixed.contains("rem IP fixo via mirrored networking (127.0.0.1)"));
     assert!(fixed.contains("127.0.0.1:3390"));
@@ -54,12 +55,21 @@ fn launcher_blocks_golden() {
         3390,
         "ABC123",
         false,
+        "1600x900",
     );
     assert!(dyn_.contains(
         "for /f \"tokens=1\" %%i in ('%WSL% -d %DISTRO% -- hostname -I 2^>nul') do set WSL_IP=%%i"
     ));
     assert!(dyn_.contains("full address:s:%WSL_IP%:3390"));
     assert!(dyn_.contains("rdpsign.exe /sha256 ABC123"));
+    // Cofre primeiro (sem arquivo, sem aviso de fornecedor), `.rdp` de fallback.
+    for c in [&fixed, &dyn_] {
+        assert!(c.contains("Ubuntu-GUI-Cred.ps1"), "sem helper: {c}");
+        assert!(
+            c.contains("else (start \"Ubuntu-GUI\" %MSTSC% /v:%WSL_IP%:3390 /w:1600 /h:900)"),
+            "sem ramo /v:: {c}"
+        );
+    }
     for token in [
         "DISTRO_VAL",
         "RDP_PORT_VAL",
@@ -67,6 +77,8 @@ fn launcher_blocks_golden() {
         "IPDISCOVERY_VAL",
         "RDPREWRITE_VAL",
         "LINUXUSER_VAL",
+        "RDP_W_VAL",
+        "RDP_H_VAL",
     ] {
         assert!(!fixed.contains(token), "sobrou {token} no fixo");
         assert!(!dyn_.contains(token), "sobrou {token} no dinamico");
