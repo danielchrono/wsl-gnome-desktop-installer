@@ -77,11 +77,23 @@ Describe 'New-LauncherContent' {
   $c = & (Get-Module UbuntuGui) { New-LauncherContent -AppName 'Ubuntu-GUI' -Distro 'Ubuntu' -LinuxUser 'daniel' `
     -RdpPort 3390 -Thumbprint 'ABC123' -DiscoveryBlock 'rem X' -RewriteBlock 'rem Y THUMBPRINT_VAL' }
   It 'troca todos os placeholders' {
-    $c | Should Not Match 'DISTRO_VAL|RDP_PORT_VAL|THUMBPRINT_VAL|IPDISCOVERY_VAL|RDPREWRITE_VAL|LINUXUSER_VAL|SHELLSVC_VAL|RDPSVC_VAL'
+    $c | Should Not Match 'DISTRO_VAL|RDP_PORT_VAL|THUMBPRINT_VAL|IPDISCOVERY_VAL|RDPREWRITE_VAL|LINUXUSER_VAL|SHELLSVC_VAL|RDPSVC_VAL|FREERDP_VAL|W_RDP_VAL'
   }
   It 'embute thumbprint e usuario' {
     $c | Should Match 'ABC123'
     $c | Should Match 'daniel'
+  }
+  It 'sem reserva mantem o erro de mstsc ausente' {
+    $c | Should Match 'mstsc.exe nao encontrado'
+  }
+  $f = & (Get-Module UbuntuGui) { New-LauncherContent -AppName 'Ubuntu-GUI' -Distro 'Ubuntu' -LinuxUser 'daniel' `
+    -RdpPort 3390 -Thumbprint 'ABC123' -DiscoveryBlock 'rem X' -RewriteBlock 'rem Y' -FreeRdpBin '/usr/bin/xfreerdp' -WRdpPath '/mnt/c/Ubuntu-GUI.rdp' }
+  It 'com reserva chama o cliente do WSL quando sem mstsc' {
+    $f | Should Match '/usr/bin/xfreerdp'
+    $f | Should Match '/mnt/c/Ubuntu-GUI.rdp'
+  }
+  It 'com reserva nao deixa placeholder' {
+    $f | Should Not Match 'FREERDP_VAL|W_RDP_VAL'
   }
 }
 

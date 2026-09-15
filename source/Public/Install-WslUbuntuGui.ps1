@@ -16,7 +16,7 @@ function Install-WslUbuntuGui {
   3. Desabilita o GDM, configura o ambiente WSLg no .bashrc
   4. Le a resolucao do monitor Windows e cria o monitor virtual igual
   5. Sobe o GNOME headless + RDP com TLS e credencial no cofre
-  6. Baixa o icone oficial do Ubuntu, restaura o mstsc se ausente, cria o .cmd e os atalhos
+  6. Baixa o icone oficial do Ubuntu, restaura o mstsc se ausente (ou garante o FreeRDP reserva no WSL), cria o .cmd e os atalhos
 #>
 [CmdletBinding()]
 param(
@@ -564,6 +564,30 @@ if (-not (Test-Path $mstscExe)) {
     } catch { Warn "mstsc nao restaurado ($($_.Exception.Message)) - instale manual: $mstscUrl" }
   }
 }
+# Sem mstsc (ex.: Home sem o cliente e stub oficial recusou): reserva via
+# FreeRDP dentro do WSL - abre pela WSLg, nada a instalar no Windows.
+# O .rdp e reaproveitado (host/usuario/resolucao); a senha e pedida na
+# janela do FreeRDP, nunca em texto no .cmd. Nunca fatal.
+$FreeRdpBin = ''
+$WRdpPath = ''
+if (-not (Test-Path $mstscExe)) {
+  $fr = Invoke-Wsl $LinuxUser "command -v xfreerdp 2>/dev/null || command -v sdl-freerdp 2>/dev/null || echo MISSING"
+  if ("$($fr.Out)" -match 'MISSING') {
+    Write-Host '  Instalando cliente RDP reserva (FreeRDP)...' -ForegroundColor Yellow
+    Invoke-Wsl $LinuxUser "printf '%s\n' '$PWQ' | sudo -S $apt apt-get install -y freerdp3-x11 2>&1" | Out-Null
+    $fr = Invoke-Wsl $LinuxUser "command -v xfreerdp 2>/dev/null || command -v sdl-freerdp 2>/dev/null || echo MISSING"
+  }
+  if ("$($fr.Out)" -match 'MISSING') {
+    Invoke-Wsl $LinuxUser "printf '%s\n' '$PWQ' | sudo -S $apt apt-get install -y freerdp2-x11 2>&1" | Out-Null
+    $fr = Invoke-Wsl $LinuxUser "command -v xfreerdp 2>/dev/null || command -v sdl-freerdp 2>/dev/null || echo MISSING"
+  }
+  if ("$($fr.Out)".Trim() -match 'MISSING') { Warn 'Sem cliente RDP reserva (freerdp3/freerdp2 ausentes no apt) - siga sem mstsc por enquanto' }
+  else {
+    $FreeRdpBin = (("$($fr.Out)".Trim()) -split '\s+')[-1]
+    $WRdpPath = '/mnt/' + $ProgDir.Substring(0, 1).ToLower() + ($ProgDir.Substring(2) -replace '\\', '/') + "/$APP_NAME.rdp"
+    Ok "Cliente RDP reserva: $FreeRdpBin"
+  }
+}
 foreach ($d in @($IconsDir, $ProgDir)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
@@ -611,7 +635,8 @@ $rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.
   else { 'powershell -NoProfile -Command "(Get-Content ''%RDPPATH%'') -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1"' }
 $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
   -LinuxUser $LinuxUser -RdpPort $RDP_PORT -Thumbprint $pubCert.Thumbprint `
-  -DiscoveryBlock $discBlock -RewriteBlock $rewriteBlock
+  -DiscoveryBlock $discBlock -RewriteBlock $rewriteBlock `
+  -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath
 [IO.File]::WriteAllText($CmdPath, $cmd)
 Ok "Script em $CmdPath"
 
