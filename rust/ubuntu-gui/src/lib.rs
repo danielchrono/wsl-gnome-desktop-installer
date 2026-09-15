@@ -4,6 +4,7 @@
 //!
 //! - `UbuntuGui-Constants.ps1` -> [`constants`]
 //! - `Write-Feedback.ps1` -> [`feedback`]
+//! - SSOT de diagnostico (retornos da pipeline S0-S7) -> [`diag`]
 //! - `Invoke-WslCommand.ps1` -> [`wsl_cmd`]
 //! - `Invoke-VaultCredential.ps1` -> [`vault`]
 //! - helper bash do cofre (embarcado) -> [`helper`]
@@ -30,6 +31,7 @@
 
 pub mod cert;
 pub mod constants;
+pub mod diag;
 pub mod distro_list;
 pub mod error;
 pub mod feedback;

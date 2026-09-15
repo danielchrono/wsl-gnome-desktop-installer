@@ -383,66 +383,9 @@ pub struct InstallOptions {
     pub transcript: Option<std::path::PathBuf>,
 }
 
-/// Reporter: imprime `Step/Ok/Warn/Fail` e acumula falhas (substitui
-/// `$script:Failures` + transcript para as nossas linhas; saida de comandos
-/// externos nao vai ao log — melhor que o PS, cujo log guardava a senha).
-pub struct Reporter {
-    failures: Vec<String>,
-    log: Option<std::fs::File>,
-}
-
-impl Reporter {
-    pub fn new(log_path: Option<&std::path::Path>) -> Self {
-        let log = log_path.and_then(|p| {
-            if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-        });
-        Self {
-            failures: Vec::new(),
-            log,
-        }
-    }
-
-    fn emit(&mut self, line: String) {
-        println!("{line}");
-        if let Some(f) = self.log.as_mut() {
-            use std::io::Write;
-            let _ = writeln!(f, "{line}");
-        }
-    }
-
-    pub fn step(&mut self, msg: &str) {
-        self.emit(crate::feedback::step(msg));
-    }
-
-    pub fn ok(&mut self, msg: &str) {
-        self.emit(crate::feedback::ok(msg));
-    }
-
-    pub fn warn(&mut self, msg: &str) {
-        self.emit(crate::feedback::warn(msg));
-    }
-
-    pub fn fail(&mut self, msg: String) {
-        let (line, _) = crate::feedback::fail(&crate::feedback::FeedbackState::new(), &msg);
-        self.failures.push(msg);
-        self.emit(line);
-    }
-
-    pub fn say(&mut self, line: &str) {
-        self.emit(line.to_string());
-    }
-
-    pub fn failures(&self) -> &[String] {
-        &self.failures
-    }
-}
+/// SSOT de diagnostico: todo retorno da pipeline passa por [`crate::diag`].
+/// Alias historico para [`crate::diag::DiagLog`].
+pub type Reporter = crate::diag::DiagLog;
 
 /// Execucao completa S0-S7 (Windows). Fora do Windows: erro tipado.
 #[cfg(not(windows))]
@@ -462,8 +405,8 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     use std::time::Duration;
 
     use crate::{
-        cert, distro_list, feedback, health, helper, input, ip, launcher, passquote, rdp, resume,
-        secure, sizing, tui, vault, wsl_cmd,
+        cert, distro_list, health, helper, input, ip, launcher, passquote, rdp, resume, secure,
+        sizing, tui, vault, wsl_cmd,
     };
 
     let d = crate::constants::defaults();
@@ -489,11 +432,11 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     // pulados por `opts.unattended` mesmo assim).
     let no_tui = opts.no_tui || opts.unattended;
 
-    let mut rep = Reporter::new(opts.transcript.as_deref());
-    rep.say(&format!("Ubuntu-GUI Installer v{}", crate::SCRIPT_VERSION));
+    let mut diag = Reporter::new(opts.transcript.as_deref());
+    diag.say(&format!("Ubuntu-GUI Installer v{}", crate::SCRIPT_VERSION));
 
     // ---- pre-checks ------------------------------------------------------
-    rep.step("Pre-checagens (Windows, rede, WSL)");
+    diag.step("Pre-checagens (Windows, rede, WSL)");
     // Porta RDP: ViewModel ja decidiu; orquestrador emite o aviso se necessario.
     if port_choice.fell_back {
         // "Nativo" so faz sentido na 3389 (porta oficial do RDP do host).
@@ -502,52 +445,68 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         } else {
             ""
         };
-        rep.warn(&format!(
+        diag.warn(&format!(
             "Porta {} ocupada{}; usando {} como alternativa (ou passe --rdp-port para forcar outra)",
             port_choice.requested, native, port_choice.port
         ));
     } else {
-        rep.ok(&format!("Porta RDP: {rdp_port}"));
+        diag.ok(&format!("Porta RDP: {rdp_port}"));
     }
 
-    let ver_out = Command::new("cmd")
-        .args(["/c", "ver"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
+    // S0 em paralelo: as 3 sondas sao independentes e so leem. `scope` pede
+    // emprestado (sem 'static); join com default fail-open; a EMISSAO segue
+    // sequencial na thread principal para o log sair na ordem de sempre.
+    // (Divergencia assumida do PS, que e sequencial: textos identicos.)
+    let (ver_out, net_ok, monitor) = std::thread::scope(|s| {
+        let h_ver = s.spawn(|| {
+            Command::new("cmd")
+                .args(["/c", "ver"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        });
+        let h_net = s.spawn(|| {
+            std::net::TcpStream::connect_timeout(
+                &"archive.ubuntu.com:80"
+                    .parse()
+                    .unwrap_or(std::net::SocketAddr::from(([0, 0, 0, 0], 0))),
+                Duration::from_secs(5),
+            )
+            .is_ok()
+        });
+        let h_mon = s.spawn(primary_monitor_resolution);
+        (
+            h_ver.join().unwrap_or_default(),
+            h_net.join().unwrap_or(false),
+            h_mon.join().unwrap_or(None),
+        )
+    });
     let build = parse_windows_build(&ver_out).unwrap_or(0);
     if build < 19041 {
-        rep.fail(format!(
+        diag.fail(format!(
             "Windows 10 2004+ ou 11 necessario (build {ver_out})"
         ));
     } else {
-        rep.ok(&format!("Windows build {build}"));
+        diag.ok(&format!("Windows build {build}"));
     }
-    let net_ok = std::net::TcpStream::connect_timeout(
-        &"archive.ubuntu.com:80"
-            .parse()
-            .unwrap_or(std::net::SocketAddr::from(([0, 0, 0, 0], 0))),
-        Duration::from_secs(5),
-    )
-    .is_ok();
     if !net_ok {
-        rep.warn("Sem resposta de archive.ubuntu.com - a instalacao APT pode falhar");
+        diag.warn("Sem resposta de archive.ubuntu.com - a instalacao APT pode falhar");
     } else {
-        rep.ok("Rede alcanca o repositorio Ubuntu");
+        diag.ok("Rede alcanca o repositorio Ubuntu");
     }
     let mut res = fallback_res.clone();
-    match primary_monitor_resolution() {
+    match monitor {
         Some((w, h)) => {
             let (sw, sh) = sizing::session_size((w, h));
             let cand = format!("{sw}x{sh}");
             if is_valid_resolution(&cand) {
                 res = cand.clone();
-                rep.ok(&format!("Resolucao do monitor: {res}"));
+                diag.ok(&format!("Resolucao do monitor: {res}"));
             } else {
-                rep.warn(&format!("Resolucao ilegivel, usando {res}"));
+                diag.warn(&format!("Resolucao ilegivel, usando {res}"));
             }
         }
-        None => rep.warn(&format!("Nao deu pra ler a resolucao, usando {res}")),
+        None => diag.warn(&format!("Nao deu pra ler a resolucao, usando {res}")),
     }
 
     // ---- retomada / perguntas -------------------------------------------
@@ -586,19 +545,19 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                     };
                     linux_pass = secure::SecureStr::new(pass);
                     resumed = true;
-                    rep.ok(&format!(
+                    diag.ok(&format!(
                         "Retomando sozinho apos o reboot (usuario {linux_user})"
                     ));
                 }
                 Err(_) => {
-                    rep.warn("Estado de retomada ilegivel - segue perguntando de novo");
+                    diag.warn("Estado de retomada ilegivel - segue perguntando de novo");
                     linux_user = String::new();
                     linux_pass = secure::SecureStr::new("");
                     net_choice = String::new();
                 }
             },
             Err(_) => {
-                rep.warn("Estado de retomada ilegivel - segue perguntando de novo");
+                diag.warn("Estado de retomada ilegivel - segue perguntando de novo");
                 linux_user = String::new();
                 linux_pass = secure::SecureStr::new("");
                 net_choice = String::new();
@@ -620,7 +579,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                 opts.linux_password.as_deref(),
             )?;
             net_choice = opts.net_choice.clone().unwrap_or_else(|| "1".to_string());
-            rep.ok(&format!("Usuario Linux: {linux_user} (nao assistido)"));
+            diag.ok(&format!("Usuario Linux: {linux_user} (nao assistido)"));
         } else if linux_user.trim().is_empty() {
             let saved_raw = std::fs::read_to_string(&saved_user_file).unwrap_or_default();
             let win_user = std::env::var("USERNAME").unwrap_or_default();
@@ -652,11 +611,11 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         }
         let check = input::test_linux_user_name(&linux_user);
         if !check.ok && check.reason == "reserved" {
-            rep.fail("O usuario 'root' e reservado - escolha outro nome".to_string());
+            diag.fail("O usuario 'root' e reservado - escolha outro nome".to_string());
             return Err(InstallError::ReservedUser);
         }
         if !check.ok {
-            rep.fail(format!(
+            diag.fail(format!(
                 "Usuario '{linux_user}' invalido (use minusculas, numeros, _ ou -)"
             ));
             return Err(InstallError::InvalidLinuxUser);
@@ -675,7 +634,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                     break;
                 }
                 if attempt < PASSWORD_MAX_ATTEMPTS {
-                    rep.warn(&format!(
+                    diag.warn(&format!(
                         "Senhas diferentes ou vazias - tente de novo ({attempt}/{PASSWORD_MAX_ATTEMPTS})"
                     ));
                 }
@@ -683,7 +642,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
             match pass {
                 Some(p) => linux_pass = p,
                 None => {
-                    rep.fail(
+                    diag.fail(
                         "Senhas diferentes ou vazias apos 3 tentativas - rode de novo"
                             .to_string(),
                     );
@@ -691,7 +650,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                 }
             }
         }
-        rep.ok(&format!("Usuario Linux: {linux_user}"));
+        diag.ok(&format!("Usuario Linux: {linux_user}"));
 
         if net_choice.trim().is_empty()
             && opts.net_choice.as_ref().is_none_or(|s| s.trim().is_empty())
@@ -724,22 +683,22 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         let resolved = input::resolve_network_choice(Some(&net_choice));
         net_choice = resolved.normalized;
         if resolved.want_mirrored {
-            rep.ok("Modo: localhost fixo 127.0.0.1 (masked)");
+            diag.ok("Modo: localhost fixo 127.0.0.1 (masked)");
         } else {
-            rep.say("  Modo: IP dinamico - o atalho identifica o IP automaticamente a cada clique");
+            diag.say("  Modo: IP dinamico - o atalho identifica o IP automaticamente a cada clique");
         }
         if resume_file.exists() {
             let _ = resume::clear_run_once();
             let _ = std::fs::remove_file(&resume_file);
             let _ = std::fs::remove_file(&resume_ps1);
-            rep.warn("Retomada pendente cancelada (novo run manual)");
+            diag.warn("Retomada pendente cancelada (novo run manual)");
         }
     }
     let pwq = passquote::get_password_quote(linux_pass.expose());
     let want_mirrored = input::resolve_network_choice(Some(&net_choice)).want_mirrored;
 
     // ---- 1. WSL + distro --------------------------------------------------
-    rep.step(&format!("1/7 WSL, rede e distro {distro}"));
+    diag.begin_step("S1_BEGIN", 1, &format!("WSL, rede e distro {distro}"));
     let wsl_list = Command::new("wsl")
         .args(["-l", "-q"])
         .output()
@@ -748,8 +707,8 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     let raw_list: Vec<&str> = wsl_list.lines().collect();
     let distros = distro_list::convert_from_wsl_distro_list(&raw_list);
     if !distros.iter().any(|x| x == &distro) {
-        rep.say(&format!("  Instalando WSL + {distro}..."));
-        rep.say(&format!("  Sem prompt duplo: o Ubuntu instala sem abrir (o usuario '{linux_user}' e criado sozinho na etapa 2)"));
+        diag.say(&format!("  Instalando WSL + {distro}..."));
+        diag.say(&format!("  Sem prompt duplo: o Ubuntu instala sem abrir (o usuario '{linux_user}' e criado sozinho na etapa 2)"));
         let argv = wsl_install_argv(&distro);
         let _ = Command::new(&argv[0]).args(&argv[1..]).status();
         std::thread::sleep(Duration::from_secs(d.fresh_install_wait_sec));
@@ -759,15 +718,15 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
             .map(|s| s.code().unwrap_or(1))
             .unwrap_or(1);
         if probe == 0 {
-            rep.ok("WSL pronto sem reboot - seguindo sozinho");
+            diag.ok("WSL pronto sem reboot - seguindo sozinho");
         } else {
             let enc = resume::protect_password_base64(linux_pass.expose())?;
             let state = resume::build_resume_state(&linux_user, &enc, &net_choice);
             let exe = std::env::current_exe().unwrap_or(prog_dir.join("ubuntu-gui.exe"));
             resume::save_resume_files(&exe, &prog_dir, &state)?;
-            rep.ok("Retomada agendada (reabre sozinho apos o reboot)");
+            diag.ok("Retomada agendada (reabre sozinho apos o reboot)");
             let reboot_now = if opts.unattended {
-                rep.say("  Modo nao assistido: reiniciando sozinho para continuar...");
+                diag.say("  Modo nao assistido: reiniciando sozinho para continuar...");
                 true
             } else {
                 print!("Reiniciar o Windows agora para continuar sozinho? [S/n]: ");
@@ -777,7 +736,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                 wants_reboot_now(&rb)
             };
             if reboot_now {
-                rep.say(&format!(
+                diag.say(&format!(
                     "  Reiniciando em {}s (cancele com: shutdown /a)...",
                     d.reboot_delay_sec
                 ));
@@ -791,19 +750,19 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                     ])
                     .status();
             } else {
-                rep.say("  Sem pressa: ao ligar de novo, a instalacao reabre sozinha (sem clicar de novo)");
+                diag.say("  Sem pressa: ao ligar de novo, a instalacao reabre sozinha (sem clicar de novo)");
             }
             return Ok(InstallOutcome::RebootRequired);
         }
     }
-    rep.ok(&format!("Distro {distro} presente"));
+    diag.ok(&format!("Distro {distro} presente"));
     let probe = Command::new("wsl")
         .args(["-d", &distro, "--", "true"])
         .status()
         .map(|s| s.code().unwrap_or(1))
         .unwrap_or(1);
     if probe != 0 {
-        rep.fail(
+        diag.fail(
             "Distro instalada mas nao inicia - abra o Ubuntu uma vez e rode de novo".to_string(),
         );
         return Err(InstallError::DistroNotStarting);
@@ -811,7 +770,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
 
     let use_mirrored = want_mirrored && build >= d.min_build_mirrored;
     if want_mirrored && build < d.min_build_mirrored {
-        rep.warn(&format!(
+        diag.warn(&format!(
             "Mirrored exige Win11 22H2+ (build {}+); usando IP dinamico",
             d.min_build_mirrored
         ));
@@ -827,36 +786,36 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
             let _ = std::fs::write(&wslcfg, new_txt);
             wsl_restart_needed = true;
         }
-        rep.ok("Mirrored networking (RDP fixo em 127.0.0.1)");
+        diag.ok("Mirrored networking (RDP fixo em 127.0.0.1)");
     } else {
         rdp_host = ip::get_wsl_ip_address(&distro)?.unwrap_or_default();
-        rep.ok(&format!(
+        diag.ok(&format!(
             "IP dinamico - cada clique detecta sozinho ({rdp_host})"
         ));
     }
 
     // ---- 2. usuario + systemd ----------------------------------------------
-    rep.step("2/7 Usuario Linux e systemd");
+    diag.begin_step("S2_BEGIN", 2, "Usuario Linux e systemd");
     let r = wsl_cmd::invoke_wsl_root(Some(&distro), &user_exists_command(&linux_user))?;
     if r.out.contains("MISSING") {
-        rep.say(&format!("  Criando usuario {linux_user} (novo)..."));
+        diag.say(&format!("  Criando usuario {linux_user} (novo)..."));
         let r = wsl_cmd::invoke_wsl_root(Some(&distro), &create_user_command(&linux_user, &pwq))?;
         if r.code != 0 {
-            rep.fail(format!("Nao criei o usuario: {}", r.out));
+            diag.fail(format!("Nao criei o usuario: {}", r.out));
         } else {
-            rep.ok(&format!("Usuario {linux_user} criado"));
+            diag.ok(&format!("Usuario {linux_user} criado"));
         }
     } else {
-        rep.ok(&format!(
+        diag.ok(&format!(
             "Usuario {linux_user} ja existe - NADA sera apagado (home e arquivos intactos)"
         ));
-        rep.say("  Atualizando a senha do Linux para a digitada...");
+        diag.say("  Atualizando a senha do Linux para a digitada...");
         let rp =
             wsl_cmd::invoke_wsl_root(Some(&distro), &update_password_command(&linux_user, &pwq))?;
         if rp.code == 0 {
-            rep.ok("Senha do Linux atualizada");
+            diag.ok("Senha do Linux atualizada");
         } else {
-            rep.fail(format!("Nao atualizei a senha: {}", rp.out));
+            diag.fail(format!("Nao atualizei a senha: {}", rp.out));
             return Err(InstallError::PasswordNotUpdated);
         }
     }
@@ -865,12 +824,12 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     if wsl_cmd::invoke_wsl_root(Some(&distro), &format!("id -u {linux_user} 2>/dev/null"))?.code
         == 0
     {
-        rep.ok(&format!("Usuario {linux_user} pronto"));
+        diag.ok(&format!("Usuario {linux_user} pronto"));
     }
     let r = wsl_cmd::invoke_wsl_root(Some(&distro), &wsl_conf_check_command(&linux_user))?;
     if r.out.contains("FIX") {
         let _ = wsl_cmd::invoke_wsl_root(Some(&distro), &wsl_conf_write_command(&linux_user))?;
-        rep.say("  Reiniciando o WSL para ativar o systemd...");
+        diag.say("  Reiniciando o WSL para ativar o systemd...");
         let _ = Command::new("wsl").args(["--shutdown"]).status();
         std::thread::sleep(Duration::from_secs(d.wsl_shutdown_wait_sec));
     }
@@ -880,14 +839,29 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         "systemctl is-system-running 2>&1 | head -n 1",
     )?;
     if is_systemd_running(&r.out) {
-        rep.ok(&format!("systemd ativo ({})", r.out.trim()));
+        diag.ok(&format!("systemd ativo ({})", r.out.trim()));
     } else {
-        rep.fail("systemd nao subiu - rode 'wsl --shutdown' e execute de novo".to_string());
+        diag.fail("systemd nao subiu - rode 'wsl --shutdown' e execute de novo".to_string());
         return Err(InstallError::SystemdDown);
     }
 
+    // S6 antecipado (1/2): o certificado do publicador e so host (cert store
+    // do Windows), sem dependencia do convidado — nasce aqui e corre
+    // SOBREPOSTO ao apt (polo longo, minutos). Sem console na thread (o
+    // powershell interno ja roda com CREATE_NO_WINDOW); emissao so no join
+    // (S6), na ordem sequencial. Erro aqui continua fatal como o `?` original.
+    let pub_cert_subject = d.publisher_subject.clone();
+    let pub_cert_years = d.cert_years;
+    let pub_cert_handle = std::thread::spawn(move || {
+        cert::ensure_publisher_certificate(&pub_cert_subject, pub_cert_years)
+    });
+
     // ---- 3. pacote GUI -------------------------------------------------------
-    rep.step(&format!("3/7 Pacote {gui_package} (+ openssl, PIL)"));
+    diag.begin_step(
+        "S3_BEGIN",
+        3,
+        &format!("Pacote {gui_package} (+ openssl, PIL)"),
+    );
     let r = wsl_cmd::invoke_wsl(
         Some(&distro),
         &linux_user,
@@ -910,16 +884,16 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                     &helper::mirror_set_command(&pwq, &url),
                 )?;
                 if set.out.contains("SET") {
-                    rep.ok(&format!("Espelho mais rapido: {url} ({secs:.2}s)"));
+                    diag.ok(&format!("Espelho mais rapido: {url} ({secs:.2}s)"));
                 } else if set.out.contains("FAIL") {
-                    rep.warn("Troca de espelho falhou - seguindo no padrao");
+                    diag.warn("Troca de espelho falhou - seguindo no padrao");
                 }
             }
             None => {
-                rep.warn("Sem espelho melhor alcancavel - seguindo no padrao");
+                diag.warn("Sem espelho melhor alcancavel - seguindo no padrao");
             }
         }
-        rep.say("  apt update + instalacao (~2 GB, demora; barra ao vivo abaixo)...");
+        diag.say("  apt update + instalacao (~2 GB, demora; barra ao vivo abaixo)...");
         let mut ok = false;
         for i in 1..=d.apt_retries {
             if ok {
@@ -947,36 +921,67 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                 .code
                     == 0;
             if !ok {
-                rep.warn(&format!("Tentativa {i} falhou, tentando de novo..."));
+                diag.warn(&format!("Tentativa {i} falhou, tentando de novo..."));
             }
         }
         if !ok {
-            rep.fail(format!(
+            diag.fail(format!(
                 "APT nao concluiu apos {} tentativas - confira a saida do apt acima",
                 d.apt_retries
             ));
             return Err(InstallError::AptFailed);
         }
     }
-    rep.ok(&format!("{gui_package} instalado"));
+    diag.ok(&format!("{gui_package} instalado"));
     let r = wsl_cmd::invoke_wsl(Some(&distro), &linux_user, "gnome-shell --version 2>&1")?;
-    rep.ok(r.out.trim());
+    diag.ok(r.out.trim());
     let _ = wsl_cmd::invoke_wsl(
         Some(&distro),
         &linux_user,
         &gdm_disable_command(&pwq, &d.gdm_service, &d.gdm_alias),
     )?;
-    rep.ok("GDM parado e desabilitado");
+    diag.ok("GDM parado e desabilitado");
     let r = wsl_cmd::invoke_wsl(Some(&distro), &linux_user, &bashrc_check_command())?;
     if r.out.contains("MISSING") {
         wsl_append_stdin(&distro, &linux_user, BASHRC_BLOCK)?;
-        rep.ok("Bloco WSLg no .bashrc");
+        diag.ok("Bloco WSLg no .bashrc");
     } else {
-        rep.ok("Bloco WSLg ja estava no .bashrc");
+        diag.ok("Bloco WSLg ja estava no .bashrc");
     }
 
+    // S6 antecipado (2/2): baixar+converter o icone so precisa de rede e do
+    // PIL — que o S3 ACABOU de instalar (sobrepor ao apt quebraria fresh
+    // install: sem PIL a conversao falha). Corre SOBREPOSTO a S4 (restart +
+    // sleeps) e S5 (cofre: timeouts longos). `invoke_wsl` e capturado, entao
+    // nada vaza no console; validacao + emissao so no join (S6).
+    let icons_dir =
+        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Icons");
+    let _ = std::fs::create_dir_all(&icons_dir);
+    let ico_path = icons_dir.join(ICON_FILE);
+    let icon_handle: Option<std::thread::JoinHandle<String>> = if !is_valid_ico_file(&ico_path) {
+        let _ = std::fs::remove_file(&ico_path);
+        let icon_cmd = icon_build_command(
+            &d.icon_url,
+            &windows_path_to_wsl(&ico_path.to_string_lossy()),
+            &icon_sizes_arg(&d.icon_sizes),
+        );
+        let icon_distro = distro.clone();
+        let icon_user = linux_user.clone();
+        Some(std::thread::spawn(move || {
+            wsl_cmd::invoke_wsl(Some(&icon_distro), &icon_user, &icon_cmd)
+                .map(|r| r.out)
+                .unwrap_or_default()
+        }))
+    } else {
+        None
+    };
+
     // ---- 4. shell headless -----------------------------------------------------
-    rep.step(&format!("4/7 Desktop GNOME headless ({res})"));
+    diag.begin_step(
+        "S4_BEGIN",
+        4,
+        &format!("Desktop GNOME headless ({res})"),
+    );
     let unit = shell_unit_content(&d.shell_binary, &res, d.shell_restart_sec);
     wsl_write_stdin(
         &distro,
@@ -1001,7 +1006,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         &shell_current_command(&d.shell_binary, &res),
     )?;
     if r.out.contains("STALE") {
-        rep.say(&format!("  (Re)iniciando o Shell em {res}..."));
+        diag.say(&format!("  (Re)iniciando o Shell em {res}..."));
         let _ = wsl_cmd::invoke_wsl(
             Some(&distro),
             &linux_user,
@@ -1010,9 +1015,9 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         std::thread::sleep(Duration::from_secs(d.shell_restart_wait_sec));
     }
     if health::test_shell_active(&linux_user, &d.shell_service).unwrap_or(false) {
-        rep.ok(&format!("GNOME Shell ativo em {res}"));
+        diag.ok(&format!("GNOME Shell ativo em {res}"));
     } else {
-        rep.fail(
+        diag.fail(
             "Shell nao subiu - journal: systemctl --user status gnome-shell-headless".to_string(),
         );
         return Err(InstallError::ShellDown);
@@ -1020,7 +1025,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     let _ = wsl_cmd::invoke_wsl(Some(&distro), &linux_user, "mkdir -p ~/Desktop")?;
 
     // ---- 5. RDP + cofre ----------------------------------------------------------
-    rep.step("5/7 RDP com TLS e credencial");
+    diag.begin_step("S5_BEGIN", 5, "RDP com TLS e credencial");
     let r = wsl_cmd::invoke_wsl(
         Some(&distro),
         &linux_user,
@@ -1032,7 +1037,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
             &linux_user,
             &tls_cert_create_command(&d.tls_cert_path, &d.tls_key_path, d.tls_cert_days),
         )?;
-        rep.ok("Certificado TLS criado");
+        diag.ok("Certificado TLS criado");
     }
     let uid = wsl_cmd::invoke_wsl(Some(&distro), &linux_user, "id -u")?
         .out
@@ -1041,9 +1046,9 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     // Prestart leve: daemon no ar antes de tudo (warn-only, nunca aborta;
     // criar via --login cobre o resto).
     if vault::start_keyring_daemon_live(Some(&distro), &linux_user, &uid) {
-        rep.ok("Daemon do cofre no ar");
+        diag.ok("Daemon do cofre no ar");
     } else {
-        rep.warn("Daemon do cofre nao respondeu - tentando criar via --login mesmo assim");
+        diag.warn("Daemon do cofre nao respondeu - tentando criar via --login mesmo assim");
     }
     // Cria quando ausente (via --login: sem sudo/pam.d, ja sai destravado).
     let (created, fresh) = vault::ensure_login_keyring_live(
@@ -1054,18 +1059,18 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         &d.keyring_path,
     )?;
     if fresh {
-        rep.ok("Cofre login criado com a senha informada");
+        diag.ok("Cofre login criado com a senha informada");
     } else if created {
-        rep.ok("Cofre login pronto");
+        diag.ok("Cofre login pronto");
     } else {
-        rep.fail("Cofre nao criado (confira ~/.local/share/keyrings/login.keyring e backups *.bak* - sem o arquivo nenhum unlock funciona)".to_string());
+        diag.fail("Cofre nao criado (confira ~/.local/share/keyrings/login.keyring e backups *.bak* - sem o arquivo nenhum unlock funciona)".to_string());
         return Err(InstallError::KeyringMissing);
     }
-    rep.say("  Desbloqueando o cofre...");
+    diag.say("  Desbloqueando o cofre...");
     // Pula unlock se ja destravado (ex.: criado agora via --login).
     let (pam_state, _) = vault::probe_state_live(Some(&distro), &linux_user, &uid)?;
     let uk = if pam_state == vault::ProbeState::Unlocked {
-        rep.ok("Cofre ja destravado (pulando unlock)");
+        diag.ok("Cofre ja destravado (pulando unlock)");
         vault::UnlockProbe {
             unlock_code: 0,
             probe: "via --login".to_string(),
@@ -1076,7 +1081,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         vault::unlock_and_probe_live(Some(&distro), &linux_user, &pwq, &uid)?
     };
     if uk.unlock_code != 0 {
-        rep.fail(format!("Cofre nao desbloqueou com a senha informada ({}) - cofre de outro run? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo nada funciona)", uk.unlock_text.trim()));
+        diag.fail(format!("Cofre nao desbloqueou com a senha informada ({}) - cofre de outro run? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo nada funciona)", uk.unlock_text.trim()));
         return Err(InstallError::KeyringLocked);
     }
     if uk.state != vault::ProbeState::Unlocked {
@@ -1085,12 +1090,12 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         std::thread::sleep(std::time::Duration::from_secs(d.keyring_reprobe_sec));
         let uk2 = vault::unlock_and_probe_live(Some(&distro), &linux_user, &pwq, &uid)?;
         if uk2.state == vault::ProbeState::Unlocked {
-            rep.ok("Cofre destravou na re-sonda");
+            diag.ok("Cofre destravou na re-sonda");
         } else if uk2.state == vault::ProbeState::Missing {
-            rep.fail(format!("Colecao login ausente (daemon responde mas sem colecao: arquivo ~/.local/share/keyrings/login.keyring sumiu ou daemon anterior a ele - retorno: {}) - restaure um backup *.bak* para login.keyring (com cp, sem apagar o backup) e rode de novo", uk2.probe));
+            diag.fail(format!("Colecao login ausente (daemon responde mas sem colecao: arquivo ~/.local/share/keyrings/login.keyring sumiu ou daemon anterior a ele - retorno: {}) - restaure um backup *.bak* para login.keyring (com cp, sem apagar o backup) e rode de novo", uk2.probe));
             return Err(InstallError::KeyringAbsent);
         } else if uk2.state == vault::ProbeState::Error {
-            rep.fail(format!("Sonda do cofre falhou (nao e 'trancado': D-Bus/sessao?) - retorno: {} - unlock disse: {} - tente 'wsl --shutdown' e rode de novo", uk2.probe, uk2.unlock_text));
+            diag.fail(format!("Sonda do cofre falhou (nao e 'trancado': D-Bus/sessao?) - retorno: {} - unlock disse: {} - tente 'wsl --shutdown' e rode de novo", uk2.probe, uk2.unlock_text));
             return Err(InstallError::KeyringLocked);
         } else {
             // Teste de controle: senha GARANTIDAMENTE errada. Rejeitada
@@ -1102,10 +1107,10 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                 &uid,
             )?;
             if ctl.unlock_code != 0 {
-                rep.fail(format!("Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: {}) - No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo nada funciona)", uk2.unlock_text));
+                diag.fail(format!("Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: {}) - No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo nada funciona)", uk2.unlock_text));
                 return Err(InstallError::KeyringLocked);
             }
-            rep.warn("Senha nao confere para o cofre existente (unlock por stdin nao valida nada aqui: senha falsa tambem sai 0) - recriando o cofre com a senha informada (backup automatico, original preservado)");
+            diag.warn("Senha nao confere para o cofre existente (unlock por stdin nao valida nada aqui: senha falsa tambem sai 0) - recriando o cofre com a senha informada (backup automatico, original preservado)");
             let (recreated, backup) = vault::reset_login_keyring_live(
                 Some(&distro),
                 &linux_user,
@@ -1114,29 +1119,29 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                 &d.keyring_path,
             )?;
             if !recreated {
-                rep.fail(format!("Recriacao falhou de forma inesperada e o original foi restaurado de {backup} - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo"));
+                diag.fail(format!("Recriacao falhou de forma inesperada e o original foi restaurado de {backup} - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo"));
                 return Err(InstallError::KeyringLocked);
             }
-            rep.ok(&format!(
+            diag.ok(&format!(
                 "Cofre recriado com a senha informada (original em {backup})"
             ));
             let (restored_state, _) =
                 vault::probe_state_live(Some(&distro), &linux_user, &uid)?;
             if restored_state == vault::ProbeState::Unlocked {
-                rep.ok("Cofre destravou apos recriar (via --login)");
+                diag.ok("Cofre destravou apos recriar (via --login)");
             } else {
                 let uk3 =
                     vault::unlock_and_probe_live(Some(&distro), &linux_user, &pwq, &uid)?;
                 if uk3.state == vault::ProbeState::Unlocked {
-                    rep.ok("Cofre destravou apos recriar");
+                    diag.ok("Cofre destravou apos recriar");
                 } else {
-                    rep.fail(format!("Cofre recriado mas segue trancado (sonda: {} - unlock disse: {}) - tente 'wsl --shutdown' e rode de novo", uk3.probe, uk3.unlock_text));
+                    diag.fail(format!("Cofre recriado mas segue trancado (sonda: {} - unlock disse: {}) - tente 'wsl --shutdown' e rode de novo", uk3.probe, uk3.unlock_text));
                     return Err(InstallError::KeyringLocked);
                 }
             }
         }
     }
-    rep.say(&format!(
+    diag.say(&format!(
         "  Gravando credencial RDP no cofre (pode levar ate ~{}s por tentativa, nao feche)...",
         d.cred_timeout_sec
     ));
@@ -1160,10 +1165,10 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         }
     }
     if !stored {
-        rep.fail(format!("Credencial RDP nao gravou no cofre (ultima saida: {last_out} - cofre trancado com outra senha? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo (nunca rm: sem o arquivo nada funciona))"));
+        diag.fail(format!("Credencial RDP nao gravou no cofre (ultima saida: {last_out} - cofre trancado com outra senha? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo (nunca rm: sem o arquivo nada funciona))"));
         return Err(InstallError::CredentialNotStored);
     }
-    rep.ok("Credencial RDP gravada");
+    diag.ok("Credencial RDP gravada");
     // O ocupante pode ser o nosso proprio RDP (mirrored expoe o convidado no
     // loopback do host): confirma no convidado e reaproveita a pedida em vez
     // de queimar uma porta nova a cada rerun.
@@ -1173,11 +1178,11 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
             .unwrap_or(false),
     ) {
         rdp_port = port_choice.requested;
-        rep.ok(&format!(
+        diag.ok(&format!(
             "Porta {rdp_port} reaproveitada (nosso RDP ja escuta nela)"
         ));
     }
-    rep.say(&format!(
+    diag.say(&format!(
         "  Aplicando TLS/porta {rdp_port} e reiniciando o servico..."
     ));
     let _ = wsl_cmd::invoke_wsl(
@@ -1187,9 +1192,9 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     )?;
     std::thread::sleep(Duration::from_secs(d.rdp_settle_sec));
     if health::test_rdp_listening(&linux_user, &d.rdp_service, rdp_port).unwrap_or(false) {
-        rep.ok(&format!("RDP ouvindo na porta {rdp_port}"));
+        diag.ok(&format!("RDP ouvindo na porta {rdp_port}"));
     } else {
-        rep.fail("RDP nao subiu".to_string());
+        diag.fail("RDP nao subiu".to_string());
         return Err(InstallError::RdpDown);
     }
     // Confia no cert TLS autoassinado (gerado por nos p/ este endpoint): some
@@ -1204,50 +1209,48 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         Ok(r) if r.out.contains("BEGIN CERTIFICATE") => {
             match crate::cert::ensure_tls_trusted(&r.out) {
                 Ok(crate::cert::TlsTrust::Added) => {
-                    rep.ok("Cert TLS confiavel (sem aviso de rede nao confiavel)")
+                    diag.ok("Cert TLS confiavel (sem aviso de rede nao confiavel)")
                 }
-                Ok(crate::cert::TlsTrust::AlreadyPresent) => rep.ok("Cert TLS ja confiavel"),
-                Err(e) => rep.warn(&format!(
+                Ok(crate::cert::TlsTrust::AlreadyPresent) => diag.ok("Cert TLS ja confiavel"),
+                Err(e) => diag.warn(&format!(
                     "Cert TLS nao importado (aviso de rede pode continuar): {e}"
                 )),
             }
         }
-        _ => rep.warn("Cert TLS nao lido no convidado (aviso de rede pode continuar)"),
+        _ => diag.warn("Cert TLS nao lido no convidado (aviso de rede pode continuar)"),
     }
 
     // ---- 6. icone + atalhos ----------------------------------------------------------
-    rep.step(&format!("6/7 Icone e atalhos ({app_name})"));
-    let icons_dir = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Icons");
-    let _ = std::fs::create_dir_all(&icons_dir);
+    diag.begin_step("S6_BEGIN", 6, &format!("Icone e atalhos ({app_name})"));
     let _ = std::fs::create_dir_all(&prog_dir);
-    let ico_path = icons_dir.join(ICON_FILE);
-    if !is_valid_ico_file(&ico_path) {
-        let _ = std::fs::remove_file(&ico_path);
-        let w_ico = windows_path_to_wsl(&ico_path.to_string_lossy());
-        let sizes = icon_sizes_arg(&d.icon_sizes);
-        let r = wsl_cmd::invoke_wsl(
-            Some(&distro),
-            &linux_user,
-            &icon_build_command(&d.icon_url, &w_ico, &sizes),
-        )?;
-        if is_valid_ico_file(&ico_path) {
-            rep.ok("Icone Ubuntu baixado e convertido");
-        } else {
-            rep.warn(&format!(
-                "Icone oficial falhou, usando o do mstsc ({})",
-                r.out
-            ));
+    // Joins do trabalho sobreposto (S3-S5): mesma ordem de emissao do
+    // sequencial. Icone: erro vira warn+fallback (fail-open: o mstsc cobre);
+    // a essa altura o wsl ja rodou dezenas de vezes, entao falha de spawn e
+    // impossivel na pratica. Cert: erro continua fatal como o `?` original.
+    match icon_handle.map(|h| h.join().unwrap_or_default()) {
+        Some(out) => {
+            if is_valid_ico_file(&ico_path) {
+                diag.ok("Icone Ubuntu baixado e convertido");
+            } else {
+                diag.warn(&format!("Icone oficial falhou, usando o do mstsc ({out})"));
+            }
         }
-    } else {
-        rep.ok("Icone ja existia");
+        None => diag.ok("Icone ja existia"),
     }
-    let (pub_cert_tp, pub_trust) =
-        cert::ensure_publisher_certificate(&d.publisher_subject, d.cert_years)?;
+    let (pub_cert_tp, pub_trust) = match pub_cert_handle.join() {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(InstallError::Dynamic(
+                "certificado do publicador: thread interrompida".to_string(),
+            ))
+        }
+    };
     match pub_trust {
         cert::PublisherTrust::TrustedNow => {
-            rep.ok("Publicador confiavel (sem aviso de fornecedor)")
+            diag.ok("Publicador confiavel (sem aviso de fornecedor)")
         }
-        cert::PublisherTrust::AlreadyTrusted => rep.ok("Publicador ja confiavel"),
+        cert::PublisherTrust::AlreadyTrusted => diag.ok("Publicador ja confiavel"),
     }
     let localhost_live = if use_mirrored {
         std::net::TcpStream::connect_timeout(
@@ -1262,21 +1265,21 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     };
     let (disc_block, rewrite_block, endpoint_note) = if localhost_live {
         rdp_host = "127.0.0.1".to_string();
-        rep.ok("RDP responde em localhost (endpoint fixo)");
+        diag.ok("RDP responde em localhost (endpoint fixo)");
         (
             launcher::discovery_block_fixed(),
             launcher::rewrite_block_fixed(),
             "",
         )
     } else if use_mirrored {
-        rep.ok("RDP via IP dinamico por enquanto (localhost ainda nao vale; rerun fixa)");
+        diag.ok("RDP via IP dinamico por enquanto (localhost ainda nao vale; rerun fixa)");
         (
             launcher::discovery_block_dynamic(),
             launcher::rewrite_block_dynamic(),
             "",
         )
     } else {
-        rep.ok("RDP via IP dinamico (cada clique detecta sozinho)");
+        diag.ok("RDP via IP dinamico (cada clique detecta sozinho)");
         (
             launcher::discovery_block_dynamic(),
             launcher::rewrite_block_dynamic(),
@@ -1299,15 +1302,15 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         rdp_h,
     );
     std::fs::write(&cmd_path, cmd_text)?;
-    rep.ok(&format!("Script em {}", cmd_path.display()));
+    diag.ok(&format!("Script em {}", cmd_path.display()));
     // Helper que grava a credencial no Cofre do Windows: o launcher prefere
     // `mstsc /v:` (sem arquivo aberto, sem aviso de fornecedor) e so volta
     // ao `.rdp` quando o helper falha (paridade com o PS).
     let cred_path = prog_dir.join(format!("{app_name}-Cred.ps1"));
     if std::fs::write(&cred_path, launcher::CRED_HELPER_SCRIPT).is_ok() {
-        rep.ok("Login sem aviso via Cofre do Windows");
+        diag.ok("Login sem aviso via Cofre do Windows");
     } else {
-        rep.warn("Helper de credencial nao criado (segue pelo .rdp)");
+        diag.warn("Helper de credencial nao criado (segue pelo .rdp)");
     }
 
     let rdp_path = prog_dir.join(format!("{app_name}.rdp"));
@@ -1319,28 +1322,28 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     // nao vai no .rdp porque o rdpsign deforma a linha longa e invalida a assinatura.
     let sidecar_path = prog_dir.join(format!("{app_name}-Cred.txt"));
     if std::fs::write(&sidecar_path, launcher::cred_sidecar_content(&linux_user, &hex)).is_ok() {
-        rep.ok("Credencial gravada no sidecar (Cred.txt)");
+        diag.ok("Credencial gravada no sidecar (Cred.txt)");
     } else {
-        rep.warn("Sidecar de credencial nao criado (segue pelo .rdp)");
+        diag.warn("Sidecar de credencial nao criado (segue pelo .rdp)");
     }
     let rdp_lines = rdp::new_rdp_file_content(&rdp_host, rdp_port, &linux_user, &res);
     std::fs::write(&rdp_path, format!("{}\n", rdp_lines.join("\n")))?;
     if rdp_path.exists() {
-        rep.ok(&format!(
+        diag.ok(&format!(
             "RDP com login automatico em {}",
             rdp_path.display()
         ));
     } else {
-        rep.fail("Arquivo .rdp nao criado".to_string());
+        diag.fail("Arquivo .rdp nao criado".to_string());
         return Err(InstallError::RdpNotCreated);
     }
     if rdp::sign_rdp_file(&rdp_path, &pub_cert_tp) {
         let short = pub_cert_tp.get(..8).unwrap_or(pub_cert_tp.as_str());
-        rep.ok(&format!(
+        diag.ok(&format!(
             "RDP assinado (sem aviso de fornecedor) [{short}]"
         ));
     } else {
-        rep.warn("Assinatura do .rdp falhou - o aviso de fornecedor pode continuar");
+        diag.warn("Assinatura do .rdp falhou - o aviso de fornecedor pode continuar");
     }
     // Atalho aponta para o .ico so quando ele e valido de verdade: apontar
     // para um arquivo corrompido (que existe) nascia o .lnk sem imagem.
@@ -1354,14 +1357,14 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     let mut links_ok = true;
     for lnk in [&desktop, &start] {
         if let Err(e) = write_shortcut(&cmd_path, &prog_dir, &ico_spec, lnk) {
-            rep.warn(&format!("atalho {}: {e}", lnk.display()));
+            diag.warn(&format!("atalho {}: {e}", lnk.display()));
             links_ok = false;
         }
     }
     if desktop.exists() && start.exists() && links_ok {
-        rep.ok("Atalhos no Desktop e no Iniciar");
+        diag.ok("Atalhos no Desktop e no Iniciar");
     } else {
-        rep.fail("Atalhos nao criados".to_string());
+        diag.fail("Atalhos nao criados".to_string());
         return Err(InstallError::ShortcutsMissing);
     }
     // Nada mais toca no .rdp depois da assinatura: se o marcador sumiu aqui,
@@ -1371,33 +1374,42 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         .map(|b| rdp::rdp_has_signature(&b))
         .unwrap_or(false);
     if !still_signed {
-        rep.warn("Assinatura sumiu apos gravar atalhos - o aviso de fornecedor pode continuar");
+        diag.warn("Assinatura sumiu apos gravar atalhos - o aviso de fornecedor pode continuar");
     }
 
     // ---- 7. verificacao ----------------------------------------------------------
-    rep.step("7/7 Verificacao ponta a ponta");
-    for t in verify_checks(&d.shell_service, &d.rdp_service, rdp_port) {
-        let r = wsl_cmd::invoke_wsl(Some(&distro), &linux_user, &t.command)?;
+    diag.begin_step("S7_BEGIN", 7, "Verificacao ponta a ponta");
+    // Sondas de leitura em paralelo (cada uma paga um spawn de wsl.exe);
+    // emissao na ordem listada e `?` preservado (erro de invoke aborta).
+    let checks = verify_checks(&d.shell_service, &d.rdp_service, rdp_port);
+    let joined = std::thread::scope(|s| {
+        checks
+            .iter()
+            .map(|t| s.spawn(|| wsl_cmd::invoke_wsl(Some(&distro), &linux_user, &t.command)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join())
+            .collect::<Vec<_>>()
+    });
+    for (t, j) in checks.iter().zip(joined) {
+        let r = j
+            .map_err(|_| InstallError::Dynamic(format!("sonda '{}' interrompida", t.name)))??;
         if check_output_matches(&r.out, &t.want) {
-            rep.ok(&t.name);
+            diag.ok(&t.name);
         } else {
-            rep.fail(format!("{} (ret: {})", t.name, r.out.trim()));
+            diag.fail(format!("{} (ret: {})", t.name, r.out.trim()));
         }
     }
     if rdp_path.exists() {
-        rep.ok("Login automatico pronto (abre direto, sem senha)");
+        diag.ok("Login automatico pronto (abre direto, sem senha)");
     } else {
-        rep.fail("Arquivo .rdp sumiu".to_string());
+        diag.fail("Arquivo .rdp sumiu".to_string());
         return Err(InstallError::RdpVanished);
     }
 
-    rep.say("");
-    let state = feedback::FeedbackState::new();
-    let mut live = state;
-    for f in rep.failures() {
-        live = live.with_failure(f.clone());
-    }
-    let failures = live.failures();
+    diag.say("");
+    // SSOT: as falhas ja vivem no DiagLog — sem hashtable espelhada.
+    let failures: Vec<String> = diag.failures().to_vec();
     if failures.is_empty() {
         if let Some(log) = opts.transcript.as_ref() {
             let _ = std::fs::remove_file(log);
@@ -1409,22 +1421,22 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         if localhost_live {
             ip = "127.0.0.1".to_string();
         }
-        rep.say("TUDO PRONTO");
-        rep.say(&format!(
+        diag.say("TUDO PRONTO");
+        diag.say(&format!(
             "  Desktop : duplo clique em {app_name} (ou mstsc em {ip}:{rdp_port})"
         ));
-        rep.say("  Login RDP : automatico (usuario e senha no Cofre do Windows)");
-        rep.say(&format!("  Resolucao do desktop: {res}"));
+        diag.say("  Login RDP : automatico (usuario e senha no Cofre do Windows)");
+        diag.say(&format!("  Resolucao do desktop: {res}"));
         if wsl_restart_needed {
-            rep.say("  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored");
+            diag.say("  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored");
         }
         return Ok(InstallOutcome::Done);
     } else {
-        rep.say("TERMINOU COM FALHAS:");
+        diag.say("TERMINOU COM FALHAS:");
         for f in failures {
-            rep.say(&format!("  - {f}"));
+            diag.say(&format!("  - {f}"));
         }
-        rep.say("Rode de novo (retoma sozinho) ou veja o log (tem a senha dentro - apague depois)");
+        diag.say("Rode de novo (retoma sozinho) ou veja o log (tem a senha dentro - apague depois)");
         return Err(InstallError::FinishedWithFailures);
     }
 
