@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "80c01419496d"
+$SCRIPT_BUILD = "ec77f35d349a"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -1423,7 +1423,7 @@ $discBlock = if ($LocalhostLive) { 'rem IP fixo via mirrored networking (127.0.0
   else { 'rem IP descoberto automaticamente a cada clique (hostname -I)' + "`r`n" + 'for /f "tokens=1" %%i in (''%WSL% -d %DISTRO% -- hostname -I 2^>nul'') do set WSL_IP=%%i' }
 # Fixo: nao reescreve o .rdp (assinatura continua valida). Dinamico: reescreve + reassina SO se o IP mudou (sem churn: o "nao perguntar de novo" do mstsc sobrevive entre cliques).
 $rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - .rdp assinado, nao alterar' }
-  else { 'for /f "tokens=3,4 delims=:" %%a in (''findstr /B "full address:s:" ''%RDPPATH%'' '') do set RDP_CUR=%%a:%%b' + "`r`n" + 'if not "%RDP_CUR%"=="%WSL_IP%:RDP_PORT_VAL" powershell -NoProfile -Command "(Get-Content ''%RDPPATH%'') -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1"' }
+  else { 'for /f "tokens=3,4 delims=:" %%a in (''findstr /B "full address:s:" ''%RDPPATH%'' '') do set RDP_CUR=%%a:%%b' + "`r`n" + 'if not "%RDP_CUR%"=="%WSL_IP%:RDP_PORT_VAL" powershell -NoProfile -Command "$c = Get-Content ''%RDPPATH%''; if ($c -match ''^full address:s:'') { $c -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; if (Test-Path ''%SYS32%\rdpsign.exe'') { & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1 } }"' }
 $rdpW = 1600; $rdpH = 900
 if ($RES -match '^(\d+)x(\d+)$') { $rdpW = [int]$Matches[1]; $rdpH = [int]$Matches[2] }
 $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
