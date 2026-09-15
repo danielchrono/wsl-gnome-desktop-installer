@@ -5,7 +5,7 @@ $script:Failures = @()
 function Step([string]$msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok([string]$msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "  [AVISO] $msg" -ForegroundColor Yellow }
-function Fail([string]$msg) { Write-Host "  [FALHA] $msg" -ForegroundColor Red; $script:Failures += $msg }
+function Fail([string]$msg) { Write-Host "  [FALHA] $msg" -ForegroundColor Red; $script:Failures += $msg; $env:UBUNTUGUI_FAIL_REPORTED = '1' }
 
 # Estado explicito (FP): hashtable imutavel por copia. Novo codigo prefere estas.
 function New-UbuntuGuiFeedbackState {
