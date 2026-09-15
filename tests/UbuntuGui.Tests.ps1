@@ -225,6 +225,36 @@ Describe 'Test-WslUnlockExitMeaningful' {
   }
 }
 
+Describe 'Start-WslKeyringDaemon' {
+  It 'daemon no ar retorna True sem dormir' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      $script:calls = @(); $script:sleeps = @()
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          $script:calls += $Command
+          if ($Command -match 'get-property') { return @{ Code = 0; Out = 'b true' } }
+          return @{ Code = 0; Out = '' } }
+        $r = Start-WslKeyringDaemon -LinuxUser 'u' -Uid '1000'
+        @($r, $script:calls.Count) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'True,2'
+  }
+  It 'daemon fora retorna False apos 10 tentativas' {
+    (& (Get-Module UbuntuGui) {
+      $realWsl = ${function:Invoke-Wsl}; $realSleep = ${function:Start-Sleep}
+      $script:sleeps = 0
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          return @{ Code = 1; Out = 'Failed to connect to bus' } }
+        ${function:Start-Sleep} = { param([int]$Seconds) $script:sleeps++ }
+        $r = Start-WslKeyringDaemon -LinuxUser 'u' -Uid '1000'
+        @($r, $script:sleeps) -join ','
+      } finally { ${function:Invoke-Wsl} = $realWsl; ${function:Start-Sleep} = $realSleep }
+    }) | Should Be 'False,10'
+  }
+}
+
 Describe 'Get-WslUnlockPipeline' {
   It 'comando byte-identico ao unlock historico' {
     (& (Get-Module UbuntuGui) { Get-WslUnlockPipeline -PasswordQuote 'pwq' -Uid '1000' }) | Should Be "printf '%s' 'pwq' | XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus gnome-keyring-daemon --unlock 2>&1 | tail -n 3"

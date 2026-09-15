@@ -362,6 +362,10 @@ if ($r.Out -match "MISSING") {
   Invoke-Wsl $LinuxUser "mkdir -p ~/.local/share/gnome-remote-desktop && openssl req -x509 -newkey rsa:2048 -keyout $TlsKeyPath -out $TlsCertPath -days $TlsDays -nodes -subj '/CN=ubuntu-wsl'" | Out-Null
   Ok "Certificado TLS criado"
 }
+# Daemon no ar ANTES do PAM (o gkr-pam nao consegue subir sozinho aqui:
+# "couldn't setup credentials" no auth.log). Com ele rodando, o PAM so cria/destrava.
+$Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
+if (Start-WslKeyringDaemon -LinuxUser $LinuxUser -Uid $Uid) { Ok "Daemon do cofre no ar" } else { Warn "Daemon do cofre nao respondeu - PAM tenta subir sozinho" }
 # Cofre login via PAM do sudo (cria com a senha do usuario; revertido em seguida).
 # O tee recebe SENHA + CONTEUDO no mesmo stdin: o sudo consome a 1a linha, o resto anexa.
 $r = Invoke-Wsl $LinuxUser "test -f $KeyringPath && echo OK || echo MISSING"
@@ -379,7 +383,7 @@ Ok "/etc/pam.d/sudo intacto"
 # Rerun apos reboot: o cofre volta bloqueado e o set-credentials travaria no prompt.
 # Gestor de cofre (Invoke-VaultCredential.ps1): unlock falhou = fail fast com
 # instrucao, nunca 2x60s de retry queimado a toa (sintoma: tentativas mudas).
-$Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
+# ($Uid ja calculado antes do prestart, acima.)
 Write-Host "  Desbloqueando o cofre..." -ForegroundColor Yellow
 # Unlock + sonda na MESMA chamada (daemon pode ser efemero: ativado por D-Bus,
 # some em segundos; duas chamadas podem atingir instancias diferentes).

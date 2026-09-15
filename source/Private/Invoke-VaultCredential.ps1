@@ -21,6 +21,21 @@ function Get-WslKeyringProbeCommand([string]$Uid) {
   return "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked 2>&1"
 }
 
+# Sobe o daemon como o proprio usuario ANTES do PAM: o gkr-pam falha ao
+# inicia-lo sozinho ("couldn't setup credentials: Operation not permitted" no
+# auth.log). Idempotente (--start com daemon rodando = no-op). Retorna $true
+# se o servico responde no bus em ate ~10s; $false nunca aborta o chamador
+# (o PAM tenta subir sozinho como antes).
+function Start-WslKeyringDaemon([string]$LinuxUser, [string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  Invoke-Wsl $LinuxUser "$envPrefix gnome-keyring-daemon --start >/dev/null 2>&1" | Out-Null
+  for ($i = 1; $i -le 10; $i++) {
+    if ((Get-WslKeyringProbeState -LinuxUser $LinuxUser -Uid $Uid).State -ne 'Error') { return $true }
+    Start-Sleep -Seconds 1
+  }
+  return $false
+}
+
 # Desbloqueia o cofre 'login' com a senha informada. Retorna @{ Code; Out }.
 # Code != 0 = senha nao confere ou daemon fora: o chamador falha rapido com
 # instrucao (nunca retry cego que queima 2x60s). PIPESTATUS[1] e o exit do

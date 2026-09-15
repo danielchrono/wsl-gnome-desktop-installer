@@ -113,5 +113,6 @@ check('unlock+sonda mesma chamada (daemon efemero)', 'function UnlockAndProbe-Ws
 check('unlock/sonda via builders unicos', 'function Get-WslUnlockPipeline' in src and 'function Get-WslKeyringProbeCommand' in src and install_src.count('UnlockAndProbe-WslKeyring -LinuxUser') == 2 and 'Unlock-WslKeyring -LinuxUser' not in install_src)
 check('pula unlock se PAM destravou + guia seahorse', 'Cofre ja destravado via PAM (pulando unlock)' in src and 'seahorse' in src and '$pamUnlocked' in install_src)
 check('teste de controle decide senha-errada vs unlock-quebrado', 'function Test-WslUnlockExitMeaningful' in src and 'ubuntugui-sonda-falsa-000' in src and 'Senha incorreta para o cofre existente' in src and 'nao destrava neste sistema' in src)
+check('prestart do daemon antes do PAM', 'function Start-WslKeyringDaemon' in src and 'gnome-keyring-daemon --start' in src and 'Daemon do cofre no ar' in src)
 
 sys.exit(1 if fails else 0)
