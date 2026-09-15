@@ -1,16 +1,29 @@
 # Gera o helper que grava a credencial RDP no Cofre do Windows (Credential Manager)
 # para o mstsc abrir sem o aviso de fornecedor (sem precisar do .rdp assinado).
-# Estatico (sem placeholder): recebe RdpPath, Host e Port por argumento e le o
-# usuario/blob DPAPI do proprio .rdp (a senha nunca fica em texto no disco).
+# Estatico (sem placeholder): recebe RdpPath, Host e Port por argumento.
+# Fonte da credencial: sidecar `-Cred.txt` (usuario + blob DPAPI, gravado na
+# instalacao) — o `.rdp` assinado NAO serve: o rdpsign deforma a linha longa
+# `password 51:b:` (uppercase + zeros + hex impar) e a extracao quebra.
+# Fallback: le usuario/blob do proprio .rdp (sanitizado; senha nunca em texto).
 # Falha nunca e fatal: o launcher volta ao .rdp quando sai codigo != 0.
 function New-CredHelperContent {
   return @'
 param([string]$RdpPath, [string]$RdpHost, [int]$RdpPort)
 try {
-  $lines = [IO.File]::ReadAllLines($RdpPath)
-  $u = @($lines | Where-Object { $_ -like 'username:s:*' })[0] -replace '^username:s:', ''
-  $h = @($lines | Where-Object { $_ -like 'password 51:b:*' })[0] -replace '^password 51:b:', ''
-  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h)) { exit 1 }
+  $u = ''; $h = ''
+  $sidecar = $PSCommandPath -replace '\.ps1$', '.txt'
+  if (Test-Path $sidecar) {
+    $sc = [IO.File]::ReadAllLines($sidecar)
+    if ($sc.Count -ge 2) { $u = $sc[0].Trim(); $h = $sc[1] -replace '[^0-9a-fA-F]', '' }
+  }
+  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h)) {
+    $lines = [IO.File]::ReadAllLines($RdpPath)
+    $u = @($lines | Where-Object { $_ -like 'username:s:*' })[0] -replace '^username:s:', ''
+    $h = @($lines | Where-Object { $_ -like 'password 51:b:*' })[0] -replace '^password 51:b:', ''
+    $u = "$u".Trim()
+    $h = "$h" -replace '[^0-9a-fA-F]', ''
+  }
+  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h) -or ($h.Length % 2 -eq 1)) { exit 1 }
   $raw = New-Object byte[] ($h.Length / 2)
   for ($i = 0; $i -lt $h.Length; $i += 2) { $raw[$i / 2] = [Convert]::ToByte($h.Substring($i, 2), 16) }
   Add-Type -AssemblyName System.Security

@@ -1313,7 +1313,15 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     if !localhost_live {
         rdp_host = ip::get_wsl_ip_address(&distro)?.unwrap_or(rdp_host);
     }
-    let rdp_lines = rdp::new_rdp_file_content(&rdp_host, rdp_port, &linux_user, &hex, &res);
+    // Sidecar -Cred.txt: usuario + blob DPAPI hex. O helper le daqui; a senha
+    // nao vai no .rdp porque o rdpsign deforma a linha longa e invalida a assinatura.
+    let sidecar_path = prog_dir.join(format!("{app_name}-Cred.txt"));
+    if std::fs::write(&sidecar_path, launcher::cred_sidecar_content(&linux_user, &hex)).is_ok() {
+        rep.ok("Credencial gravada no sidecar (Cred.txt)");
+    } else {
+        rep.warn("Sidecar de credencial nao criado (segue pelo .rdp)");
+    }
+    let rdp_lines = rdp::new_rdp_file_content(&rdp_host, rdp_port, &linux_user, &res);
     std::fs::write(&rdp_path, format!("{}\n", rdp_lines.join("\n")))?;
     if rdp_path.exists() {
         rep.ok(&format!(
@@ -1403,7 +1411,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         rep.say(&format!(
             "  Desktop : duplo clique em {app_name} (ou mstsc em {ip}:{rdp_port})"
         ));
-        rep.say("  Login RDP : automatico (usuario e senha salvos no .rdp)");
+        rep.say("  Login RDP : automatico (usuario e senha no Cofre do Windows)");
         rep.say(&format!("  Resolucao do desktop: {res}"));
         if wsl_restart_needed {
             rep.say("  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored");

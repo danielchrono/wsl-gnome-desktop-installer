@@ -20,14 +20,26 @@ pub const LAUNCHER_TEMPLATE: &str = "\n@echo off\nrem APP_NAME - liga o WSL, gar
 
 /// Helper que grava a credencial RDP no Cofre do Windows (paridade com
 /// `New-CredHelperContent.ps1`): estatico, sem placeholder — recebe
-/// `RdpPath`, `Host` e `Port` por argumento e le usuario/blob DPAPI do
-/// proprio `.rdp`. Falha nunca e fatal: o launcher volta ao `.rdp`.
+/// `RdpPath`, `Host` e `Port` por argumento. Fonte: sidecar `-Cred.txt`
+/// (o `.rdp` assinado nao serve: o rdpsign deforma a linha longa
+/// `password 51:b:` e a extracao quebra; o `.rdp` segue como fallback).
+/// Falha nunca e fatal: o launcher volta ao `.rdp`.
 pub const CRED_HELPER_SCRIPT: &str = r#"param([string]$RdpPath, [string]$RdpHost, [int]$RdpPort)
 try {
-  $lines = [IO.File]::ReadAllLines($RdpPath)
-  $u = @($lines | Where-Object { $_ -like 'username:s:*' })[0] -replace '^username:s:', ''
-  $h = @($lines | Where-Object { $_ -like 'password 51:b:*' })[0] -replace '^password 51:b:', ''
-  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h)) { exit 1 }
+  $u = ''; $h = ''
+  $sidecar = $PSCommandPath -replace '\.ps1$', '.txt'
+  if (Test-Path $sidecar) {
+    $sc = [IO.File]::ReadAllLines($sidecar)
+    if ($sc.Count -ge 2) { $u = $sc[0].Trim(); $h = $sc[1] -replace '[^0-9a-fA-F]', '' }
+  }
+  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h)) {
+    $lines = [IO.File]::ReadAllLines($RdpPath)
+    $u = @($lines | Where-Object { $_ -like 'username:s:*' })[0] -replace '^username:s:', ''
+    $h = @($lines | Where-Object { $_ -like 'password 51:b:*' })[0] -replace '^password 51:b:', ''
+    $u = "$u".Trim()
+    $h = "$h" -replace '[^0-9a-fA-F]', ''
+  }
+  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h) -or ($h.Length % 2 -eq 1)) { exit 1 }
   $raw = New-Object byte[] ($h.Length / 2)
   for ($i = 0; $i -lt $h.Length; $i += 2) { $raw[$i / 2] = [Convert]::ToByte($h.Substring($i, 2), 16) }
   Add-Type -AssemblyName System.Security
@@ -41,6 +53,12 @@ try {
 } catch { exit 1 }
 exit 0
 "#;
+
+/// Conteudo do sidecar `-Cred.txt`: usuario na 1a linha, blob DPAPI em hex
+/// na 2a (o helper le dai; o `.rdp` assinado deforma a linha longa).
+pub fn cred_sidecar_content(linux_user: &str, password_hex: &str) -> String {
+    format!("{linux_user}\n{password_hex}\n")
+}
 
 /// Bloco de descoberta quando o localhost ja vale (mirrored + RDP de pe).
 pub fn discovery_block_fixed() -> String {
@@ -195,11 +213,14 @@ mod tests {
 
     #[test]
     fn cred_helper_writes_vault_entries() {
-        // Paridade com `New-CredHelperContent.ps1`: le usuario/blob do
-        // proprio `.rdp`, descriptografa via DPAPI e grava `TERMSRV/`.
+        // Paridade com `New-CredHelperContent.ps1`: sidecar primeiro,
+        // `.rdp` como fallback sanitizado, e grava `TERMSRV/` via DPAPI.
         for needle in [
             "param([string]$RdpPath, [string]$RdpHost, [int]$RdpPort)",
+            "$sidecar = $PSCommandPath -replace '\\.ps1$', '.txt'",
             "password 51:b:",
+            "0-9a-fA-F",
+            "Length % 2 -eq 1",
             "ProtectedData",
             "Unprotect",
             "CredWriteW",
@@ -210,6 +231,14 @@ mod tests {
                 "helper sem {needle}"
             );
         }
+    }
+
+    #[test]
+    fn cred_sidecar_carries_user_and_blob() {
+        let c = cred_sidecar_content("daniel", "aabb");
+        let mut lines = c.lines();
+        assert_eq!(lines.next(), Some("daniel"));
+        assert_eq!(lines.next(), Some("aabb"));
     }
 
     #[test]

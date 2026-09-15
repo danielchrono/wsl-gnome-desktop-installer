@@ -8,21 +8,26 @@
 use crate::error::InstallError;
 
 /// `New-RdpFileContent`: ordem das linhas espelha o PowerShell — `screen
-/// mode` + `bpp` + `smart sizing`, resolucao (se `WxH`), endereco, usuario,
-/// senha, flags. Resolucao fora de `^(\d+)x(\d+)$` e ignorada (WxH-gate).
+/// mode` + `bpp` + `dynamic resolution`, resolucao (se `WxH`), endereco, usuario,
+/// flags (SEM `password 51:b:`: o rdpsign deforma a linha longa e quebra a
+/// assinatura; a senha vai no sidecar `-Cred.txt` para o Cofre).
+/// Resolucao fora de `^(\d+)x(\d+)$` e ignorada (WxH-gate).
 pub fn new_rdp_file_content(
     rdp_host: &str,
     rdp_port: u16,
     linux_user: &str,
-    password_hex: &str,
     resolution: &str,
 ) -> Vec<String> {
     let mut rdp = vec![
         // 1 = janela (2 = tela cheia); paridade com o PS — maximizar continua possivel.
         "screen mode id:i:1".to_string(),
         "session bpp:i:32".to_string(),
-        // A sessao acompanha a janela (sem barras pretas ao redimensionar).
-        "smart sizing:i:1".to_string(),
+        // dynamic resolution: chave exploratoria (ignorada por mstsc desconhecido);
+        // o beneficio real e a remocao do smart sizing, que bloqueava o redimensionamento
+        // dinamico do xrdp — sem ele o servidor ja acompanha a janela por padrao.
+        "dynamic resolution:i:1".to_string(),
+        // USB do host na sessao (paridade com o PS).
+        "usbdevicestoredirect:s:*".to_string(),
     ];
     if let Some((w, h)) = split_resolution(resolution) {
         rdp.push(format!("desktopwidth:i:{w}"));
@@ -30,7 +35,8 @@ pub fn new_rdp_file_content(
     }
     rdp.push(format!("full address:s:{rdp_host}:{rdp_port}"));
     rdp.push(format!("username:s:{linux_user}"));
-    rdp.push(format!("password 51:b:{password_hex}"));
+    // Senha omitida do .rdp: o rdpsign deforma a linha `password 51:b:<hex>` longa
+    // (528 chars) e invalida a assinatura; a credencial vai no sidecar `-Cred.txt`.
     rdp.push("prompt for credentials:i:0".to_string());
     rdp.push("enablecredsspsupport:i:1".to_string());
     rdp.push("authentication level:i:0".to_string());
@@ -140,7 +146,13 @@ mod tests {
     use super::*;
 
     fn sample() -> Vec<String> {
-        new_rdp_file_content("127.0.0.1", 3390, "daniel", "aabb", "1600x900")
+        new_rdp_file_content("127.0.0.1", 3390, "daniel", "1600x900")
+    }
+
+    #[test]
+    fn no_password_blob_in_signed_file() {
+        // Senha omitida: o rdpsign deforma linhas longas e quebra a assinatura.
+        assert!(sample().iter().all(|l| !l.starts_with("password 51:b:")));
     }
 
     #[test]
@@ -156,7 +168,14 @@ mod tests {
         assert!(rdp.contains(&"desktopwidth:i:1600".to_string()));
         assert!(rdp.contains(&"desktopheight:i:900".to_string()));
         assert!(rdp.contains(&"prompt for credentials:i:0".to_string()));
-        assert!(rdp.contains(&"password 51:b:aabb".to_string()));
+        // Senha nao esta no .rdp; vai no sidecar -Cred.txt.
+        assert!(!rdp.iter().any(|l| l.starts_with("password 51:b:")));
+        // NLA mantida (enablecredsspsupport e negotiate security layer).
+        assert!(rdp.iter().any(|l| l.starts_with("enablecredsspsupport")));
+        assert!(rdp.iter().any(|l| l.starts_with("negotiate security layer")));
+        // smart sizing removido.
+        assert!(!rdp.iter().any(|l| l.starts_with("smart sizing")));
+        assert!(rdp.contains(&"dynamic resolution:i:1".to_string()));
     }
 
     #[test]
@@ -171,12 +190,12 @@ mod tests {
             vec![
                 "screen mode id:i:1",
                 "session bpp:i:32",
-                "smart sizing:i:1",
+                "dynamic resolution:i:1",
+                "usbdevicestoredirect:s:*",
                 "desktopwidth:i:1600",
                 "desktopheight:i:900",
                 "full address:s:127.0.0.1:3390",
                 "username:s:daniel",
-                "password 51:b:aabb",
                 "prompt for credentials:i:0",
                 "enablecredsspsupport:i:1",
                 "authentication level:i:0",
@@ -191,11 +210,11 @@ mod tests {
 
     #[test]
     fn invalid_resolution_skips_w_h_lines() {
-        let rdp = new_rdp_file_content("h", 3390, "u", "00", "abc");
+        let rdp = new_rdp_file_content("h", 3390, "u", "abc");
         assert!(!rdp.iter().any(|l| l.starts_with("desktopwidth")));
         assert!(!rdp.iter().any(|l| l.starts_with("desktopheight")));
         // WxH-gate: parcial nao entra.
-        let rdp = new_rdp_file_content("h", 3390, "u", "00", "1600x");
+        let rdp = new_rdp_file_content("h", 3390, "u", "1600x");
         assert!(!rdp.iter().any(|l| l.starts_with("desktopwidth")));
     }
 

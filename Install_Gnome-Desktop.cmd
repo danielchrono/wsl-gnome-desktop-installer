@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "92fe830eeeca"
+$SCRIPT_BUILD = "d7e081f36e29"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -661,15 +661,18 @@ function Read-TuiSecurePassword {
   $secure.MakeReadOnly()
   return $secure
 }
-# Monta as linhas do .rdp com login automatico (senha em blob DPAPI, so este usuario le).
+# Monta as linhas do .rdp com login automatico (SEM senha embutida: o rdpsign
+# deforma a linha longa `password 51:b:` e invalida a assinatura; a senha vai
+# no sidecar `-Cred.txt` para o Cofre do Windows).
 function New-RdpFileContent(
   [string]$RdpHost,
   [int]$RdpPort,
   [string]$LinuxUser,
-  [string]$PasswordHex,
   [string]$Resolution
 ) {
-  $rdp = @('screen mode id:i:1', 'session bpp:i:32', 'smart sizing:i:1')  # 1 = janela (2 = tela cheia); maximizar continua possivel; smart sizing = a sessao acompanha a janela (sem barras pretas)
+  # dynamic resolution: o servidor redesenha na resolucao atual da janela ao
+  # redimensionar — sem barras pretas horizontais ou verticais.
+  $rdp = @('screen mode id:i:1', 'session bpp:i:32', 'dynamic resolution:i:1')  # 1 = janela (2 = tela cheia); maximizar continua possivel
   $rdp += 'usbdevicestoredirect:s:*'  # USB do host na sessao (o servidor/GNOME pode recusar algumas classes)
   if ($Resolution -match '^(\d+)x(\d+)$') {
     $rdp += "desktopwidth:i:$($Matches[1])"
@@ -677,7 +680,6 @@ function New-RdpFileContent(
   }
   $rdp += "full address:s:${RdpHost}:$RdpPort"
   $rdp += "username:s:$LinuxUser"
-  $rdp += "password 51:b:$PasswordHex"
   $rdp += 'prompt for credentials:i:0'
   $rdp += 'enablecredsspsupport:i:1'
   $rdp += 'authentication level:i:0'  # 0 = nao avisar: cert e autoassinado (loopback/WSL, sem MITM pratico)
@@ -746,17 +748,30 @@ goto :ENDLAUNCH
 }
 # Gera o helper que grava a credencial RDP no Cofre do Windows (Credential Manager)
 # para o mstsc abrir sem o aviso de fornecedor (sem precisar do .rdp assinado).
-# Estatico (sem placeholder): recebe RdpPath, Host e Port por argumento e le o
-# usuario/blob DPAPI do proprio .rdp (a senha nunca fica em texto no disco).
+# Estatico (sem placeholder): recebe RdpPath, Host e Port por argumento.
+# Fonte da credencial: sidecar `-Cred.txt` (usuario + blob DPAPI, gravado na
+# instalacao) — o `.rdp` assinado NAO serve: o rdpsign deforma a linha longa
+# `password 51:b:` (uppercase + zeros + hex impar) e a extracao quebra.
+# Fallback: le usuario/blob do proprio .rdp (sanitizado; senha nunca em texto).
 # Falha nunca e fatal: o launcher volta ao .rdp quando sai codigo != 0.
 function New-CredHelperContent {
   return @'
 param([string]$RdpPath, [string]$RdpHost, [int]$RdpPort)
 try {
-  $lines = [IO.File]::ReadAllLines($RdpPath)
-  $u = @($lines | Where-Object { $_ -like 'username:s:*' })[0] -replace '^username:s:', ''
-  $h = @($lines | Where-Object { $_ -like 'password 51:b:*' })[0] -replace '^password 51:b:', ''
-  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h)) { exit 1 }
+  $u = ''; $h = ''
+  $sidecar = $PSCommandPath -replace '\.ps1$', '.txt'
+  if (Test-Path $sidecar) {
+    $sc = [IO.File]::ReadAllLines($sidecar)
+    if ($sc.Count -ge 2) { $u = $sc[0].Trim(); $h = $sc[1] -replace '[^0-9a-fA-F]', '' }
+  }
+  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h)) {
+    $lines = [IO.File]::ReadAllLines($RdpPath)
+    $u = @($lines | Where-Object { $_ -like 'username:s:*' })[0] -replace '^username:s:', ''
+    $h = @($lines | Where-Object { $_ -like 'password 51:b:*' })[0] -replace '^password 51:b:', ''
+    $u = "$u".Trim()
+    $h = "$h" -replace '[^0-9a-fA-F]', ''
+  }
+  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h) -or ($h.Length % 2 -eq 1)) { exit 1 }
   $raw = New-Object byte[] ($h.Length / 2)
   for ($i = 0; $i -lt $h.Length; $i += 2) { $raw[$i / 2] = [Convert]::ToByte($h.Substring($i, 2), 16) }
   Add-Type -AssemblyName System.Security
@@ -1512,17 +1527,21 @@ Ok "Script em $CmdPath"
 # Helper que grava a credencial no Cofre do Windows (login sem aviso de fornecedor).
 $CredHelperPath = Join-Path $ProgDir "$APP_NAME-Cred.ps1"
 [IO.File]::WriteAllText($CredHelperPath, (New-CredHelperContent))
-if (Test-Path $CredHelperPath) { Ok "Login sem aviso via Cofre do Windows" }
-else { Warn "Helper de credencial nao criado (segue pelo .rdp)" }
-
-# .rdp com login automatico: senha em blob DPAPI (so este usuario Windows le)
-$RdpPath = Join-Path $ProgDir "$APP_NAME.rdp"
+# Sidecar -Cred.txt: usuario + blob DPAPI hex. O helper le daqui; a senha nao
+# vai no .rdp porque o rdpsign deforma a linha longa e invalida a assinatura.
+$CredTxtPath = Join-Path $ProgDir "$APP_NAME-Cred.txt"
 Add-Type -AssemblyName System.Security
 $blob = [Security.Cryptography.ProtectedData]::Protect(
   [Text.Encoding]::Unicode.GetBytes($LinuxPass), $null, 'CurrentUser')
 $hex = ($blob | ForEach-Object { $_.ToString('x2') }) -join ''
+[IO.File]::WriteAllLines($CredTxtPath, @($LinuxUser, $hex))
+if ((Test-Path $CredHelperPath) -and (Test-Path $CredTxtPath)) { Ok "Login sem aviso via Cofre do Windows" }
+else { Warn "Helper de credencial nao criado (segue pelo .rdp)" }
+
+# .rdp com login automatico (SEM senha embutida: vai no sidecar p/ o Cofre)
+$RdpPath = Join-Path $ProgDir "$APP_NAME.rdp"
 if (-not $LocalhostLive) { $RdpHost = Get-WslIpAddress -Distro $DISTRO }
-$rdp = New-RdpFileContent -RdpHost $RdpHost -RdpPort $RDP_PORT -LinuxUser $LinuxUser -PasswordHex $hex -Resolution $RES
+$rdp = New-RdpFileContent -RdpHost $RdpHost -RdpPort $RDP_PORT -LinuxUser $LinuxUser -Resolution $RES
 [IO.File]::WriteAllLines($RdpPath, $rdp)
 if (Test-Path $RdpPath) { Ok "RDP com login automatico em $RdpPath" }
 else { Fail "Arquivo .rdp nao criado"; throw "RDP nao criado" }
@@ -1622,7 +1641,7 @@ if ($LiveFailures.Count -eq 0) {
   if ($LocalhostLive) { $ip = '127.0.0.1' }
   Write-Host "TUDO PRONTO" -ForegroundColor Green
   Write-Host "  Desktop : duplo clique em $APP_NAME (ou mstsc em ${ip}:$RDP_PORT)"
-  Write-Host "  Login RDP : automatico (usuario e senha salvos no .rdp)"
+  Write-Host "  Login RDP : automatico (usuario e senha no Cofre do Windows)"
   Write-Host "  Resolucao do desktop: $RES"
   if ($wslRestartNeeded -and $UseMirrored) { Write-Host "  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored" -ForegroundColor Yellow }
 } else {

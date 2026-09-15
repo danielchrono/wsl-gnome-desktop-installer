@@ -6,18 +6,21 @@ use ubuntu_gui::{REBOOT_SENTINEL, SCRIPT_VERSION};
 
 #[test]
 fn rdp_line_order_golden() {
-    let rdp =
-        ubuntu_gui::rdp::new_rdp_file_content("127.0.0.1", 3390, "daniel", "aabb", "1600x900");
+    let rdp = ubuntu_gui::rdp::new_rdp_file_content("127.0.0.1", 3390, "daniel", "1600x900");
     let text = rdp.join("\n");
+    assert!(
+        !text.lines().any(|l| l.starts_with("password 51:b:")),
+        "senha no arquivo assinado"
+    );
     let order = [
         "screen mode id:i:1",
         "session bpp:i:32",
-        "smart sizing:i:1",
+        "dynamic resolution:i:1",
+        "usbdevicestoredirect:s:*",
         "desktopwidth:i:1600",
         "desktopheight:i:900",
         "full address:s:127.0.0.1:3390",
         "username:s:daniel",
-        "password 51:b:aabb",
         "prompt for credentials:i:0",
         "enablecredsspsupport:i:1",
         "authentication level:i:0",

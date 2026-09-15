@@ -684,17 +684,21 @@ Ok "Script em $CmdPath"
 # Helper que grava a credencial no Cofre do Windows (login sem aviso de fornecedor).
 $CredHelperPath = Join-Path $ProgDir "$APP_NAME-Cred.ps1"
 [IO.File]::WriteAllText($CredHelperPath, (New-CredHelperContent))
-if (Test-Path $CredHelperPath) { Ok "Login sem aviso via Cofre do Windows" }
-else { Warn "Helper de credencial nao criado (segue pelo .rdp)" }
-
-# .rdp com login automatico: senha em blob DPAPI (so este usuario Windows le)
-$RdpPath = Join-Path $ProgDir "$APP_NAME.rdp"
+# Sidecar -Cred.txt: usuario + blob DPAPI hex. O helper le daqui; a senha nao
+# vai no .rdp porque o rdpsign deforma a linha longa e invalida a assinatura.
+$CredTxtPath = Join-Path $ProgDir "$APP_NAME-Cred.txt"
 Add-Type -AssemblyName System.Security
 $blob = [Security.Cryptography.ProtectedData]::Protect(
   [Text.Encoding]::Unicode.GetBytes($LinuxPass), $null, 'CurrentUser')
 $hex = ($blob | ForEach-Object { $_.ToString('x2') }) -join ''
+[IO.File]::WriteAllLines($CredTxtPath, @($LinuxUser, $hex))
+if ((Test-Path $CredHelperPath) -and (Test-Path $CredTxtPath)) { Ok "Login sem aviso via Cofre do Windows" }
+else { Warn "Helper de credencial nao criado (segue pelo .rdp)" }
+
+# .rdp com login automatico (SEM senha embutida: vai no sidecar p/ o Cofre)
+$RdpPath = Join-Path $ProgDir "$APP_NAME.rdp"
 if (-not $LocalhostLive) { $RdpHost = Get-WslIpAddress -Distro $DISTRO }
-$rdp = New-RdpFileContent -RdpHost $RdpHost -RdpPort $RDP_PORT -LinuxUser $LinuxUser -PasswordHex $hex -Resolution $RES
+$rdp = New-RdpFileContent -RdpHost $RdpHost -RdpPort $RDP_PORT -LinuxUser $LinuxUser -Resolution $RES
 [IO.File]::WriteAllLines($RdpPath, $rdp)
 if (Test-Path $RdpPath) { Ok "RDP com login automatico em $RdpPath" }
 else { Fail "Arquivo .rdp nao criado"; throw "RDP nao criado" }
@@ -794,7 +798,7 @@ if ($LiveFailures.Count -eq 0) {
   if ($LocalhostLive) { $ip = '127.0.0.1' }
   Write-Host "TUDO PRONTO" -ForegroundColor Green
   Write-Host "  Desktop : duplo clique em $APP_NAME (ou mstsc em ${ip}:$RDP_PORT)"
-  Write-Host "  Login RDP : automatico (usuario e senha salvos no .rdp)"
+  Write-Host "  Login RDP : automatico (usuario e senha no Cofre do Windows)"
   Write-Host "  Resolucao do desktop: $RES"
   if ($wslRestartNeeded -and $UseMirrored) { Write-Host "  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored" -ForegroundColor Yellow }
 } else {

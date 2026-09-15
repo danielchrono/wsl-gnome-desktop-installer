@@ -59,7 +59,7 @@ Describe 'Get-FirstIpAddress' {
 }
 
 Describe 'New-RdpFileContent' {
-  $rdp = & (Get-Module UbuntuGui) { New-RdpFileContent -RdpHost '127.0.0.1' -RdpPort 3390 -LinuxUser 'daniel' -PasswordHex 'aabb' -Resolution '1600x900' }
+  $rdp = & (Get-Module UbuntuGui) { New-RdpFileContent -RdpHost '127.0.0.1' -RdpPort 3390 -LinuxUser 'daniel' -Resolution '1600x900' }
   It 'traz endereco e usuario' {
     ($rdp -join "`n") | Should Match 'full address:s:127.0.0.1:3390'
     ($rdp -join "`n") | Should Match 'username:s:daniel'
@@ -75,8 +75,29 @@ Describe 'New-RdpFileContent' {
     ($rdp -contains 'screen mode id:i:1') | Should Be $true
     ($rdp -contains 'usbdevicestoredirect:s:*') | Should Be $true
   }
-  It 'sessao acompanha a janela (sem barras pretas)' {
-    ($rdp -contains 'smart sizing:i:1') | Should Be $true
+  It 'sem blob de senha no arquivo (rdpsign deforma)' {
+    ($rdp -join "`n") | Should Not Match 'password 51:b:'
+  }
+  It 'acompanha a janela via dynamic resolution (NLA mantida)' {
+    ($rdp -contains 'dynamic resolution:i:1') | Should Be $true
+    ($rdp -contains 'enablecredsspsupport:i:1') | Should Be $true
+    ($rdp -contains 'negotiate security layer:i:1') | Should Be $true
+  }
+}
+
+Describe 'New-CredHelperContent' {
+  $h = & (Get-Module UbuntuGui) { New-CredHelperContent }
+  It 'le do sidecar primeiro (fallback no rdp sanitizado)' {
+    $h | Should Match 'PSCommandPath'
+    $h | Should Match 'ReadAllLines\(\$sidecar\)'
+    $h | Should Match 'password 51:b:'
+  }
+  It 'rejeita blob impar antes do parse (sem excecao)' {
+    $h | Should Match 'Length % 2 -eq 1'
+  }
+  It 'sidecar -Cred.txt gravado na instalacao' {
+    $src = & (Get-Module UbuntuGui) { (Get-Command Install-WslUbuntuGui).ScriptBlock.ToString() }
+    $src | Should Match '\$APP_NAME-Cred\.txt'
   }
 }
 
