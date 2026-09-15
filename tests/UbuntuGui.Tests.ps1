@@ -71,6 +71,10 @@ Describe 'New-RdpFileContent' {
   It 'sem aviso de cert autoassinado' {
     ($rdp -contains 'authentication level:i:0') | Should Be $true
   }
+  It 'abre em janela e redireciona USB' {
+    ($rdp -contains 'screen mode id:i:1') | Should Be $true
+    ($rdp -contains 'usbdevicestoredirect:s:*') | Should Be $true
+  }
 }
 
 Describe 'New-LauncherContent' {

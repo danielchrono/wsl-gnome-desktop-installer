@@ -59,6 +59,8 @@ check('credencial verificada no daemon (nao so cofre)', 'grdctl status' in src a
 check('view-only desativado', 'disable-view-only' in src)
 check('cofre desbloqueado antes do set-credentials', 'gnome-keyring-daemon --unlock' in src and 'XDG_RUNTIME_DIR=/run/user/$Uid' in src)
 check('rdp sem aviso de cert autoassinado', "'authentication level:i:0'" in src)
+check('rdp abre em janela (nao tela cheia)', "'screen mode id:i:1'" in src)
+check('rdp redireciona USB do host', "'usbdevicestoredirect:s:*'" in src)
 check('rdp assinado (rdpsign)', 'rdpsign.exe' in src and 'signature:s:' in src)
 check('publicador confiavel idempotente', 'TrustedPublishers' in src and 'CN=Ubuntu-GUI RDP' in src)
 check('launcher fixo preserva assinatura', 'RDPREWRITE_VAL' in src and 'nao alterar' in src)
