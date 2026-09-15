@@ -1206,7 +1206,7 @@ if (-not (Test-Path $IcoPath)) {
   # C:\... -> /mnt/c/... (sintaxe compativel com Windows PowerShell 5.1)
   $wIco = '/mnt/' + $IcoPath.Substring(0, 1).ToLower() + ($IcoPath.Substring(2) -replace '\\', '/')
   $iconSizesArg = ($IconSizes | ForEach-Object { "($_ ,$_)" }) -join ','
-  $r = Invoke-Wsl $LinuxUser "curl -sL --max-time 60 -o /tmp/cof.png '$ICON_URL' && python3 -c `"from PIL import Image; im=Image.open('/tmp/cof.png').convert('RGBA'); S=max(im.size); sq=Image.new('RGBA',(S,S),(0,0,0,0)); sq.paste(im,((S-im.width)//2,(S-im.height)//2),im); sq.save('$wIco',sizes=[$iconSizesArg])`"" 2>&1
+  $r = Invoke-Wsl $LinuxUser "curl -sSL --retry 2 --retry-delay 5 --retry-all-errors --show-error --max-time 60 -o /tmp/cof.png '$ICON_URL' && python3 -c `"from PIL import Image; im=Image.open('/tmp/cof.png').convert('RGBA'); S=max(im.size); sq=Image.new('RGBA',(S,S),(0,0,0,0)); sq.paste(im,((S-im.width)//2,(S-im.height)//2),im); sq.save('$wIco',sizes=[$iconSizesArg])`"" 2>&1
   if (Test-Path $IcoPath) { Ok "Icone Ubuntu baixado e convertido" }
   else { Warn "Icone oficial falhou, usando o do mstsc ($($r.Out))" }
 } else { Ok "Icone ja existia" }
@@ -1249,7 +1249,15 @@ if (Test-Path $RdpPath) { Ok "RDP com login automatico em $RdpPath" }
 else { Fail "Arquivo .rdp nao criado"; throw "RDP nao criado" }
 
 # Assina o .rdp p/ sumir o aviso "fornecedor desconhecido" (rerun reassina apos regerar).
-& "$env:SystemRoot\System32\rdpsign.exe" /sha256 $pubCert.Thumbprint "$RdpPath" | Out-Null
+# rdpsign ausente (SKU sem o binario, ou powershell 32-bit vendo SysWOW64) nao
+# pode matar a instalacao: assinatura e cosmetica, o .rdp funciona sem ela.
+$rdpSign = "$env:SystemRoot\System32\rdpsign.exe"
+if ((-not [Environment]::Is64BitProcess) -and (Test-Path "$env:SystemRoot\Sysnative\rdpsign.exe")) { $rdpSign = "$env:SystemRoot\Sysnative\rdpsign.exe" }
+if (Test-Path $rdpSign) {
+  & $rdpSign /sha256 $pubCert.Thumbprint "$RdpPath" | Out-Null
+} else {
+  Warn "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)"
+}
 if ([IO.File]::ReadAllText($RdpPath) -match 'signature:s:') { Ok "RDP assinado (sem aviso de fornecedor)" }
 else { Warn "Assinatura do .rdp falhou - o aviso de fornecedor pode continuar" }
 

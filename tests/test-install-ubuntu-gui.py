@@ -83,6 +83,8 @@ check('apt espera DNS do WSL pos-reboot', 'getent hosts archive.ubuntu.com' in s
 check('apt recupera dpkg interrompido', 'dpkg --configure -a' in src and 'apt-get install -f -y' in src)
 check('apt com backoff entre tentativas', 'AptRetrySec' in src and 'antes da tentativa' in src)
 check('apt com barra ao vivo (stdio herdado)', 'barra ao vivo abaixo' in src and '--exec bash -c "printf' in src)
+check('icone: curl com retry e erro visivel', '--retry-all-errors' in src and '--show-error' in src)
+check('rdpsign ausente nao mata (avisa e segue)', 'Sysnative' in src and 'pulando assinatura' in src)
 check('limpa retomada no sucesso', 'Clear-ResumeState' in src)
 check('versao 0.1.0', 'SCRIPT_VERSION' in src and '"0.1.0"' in src)
 tracked = []
