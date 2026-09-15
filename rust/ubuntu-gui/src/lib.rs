@@ -45,6 +45,7 @@ pub mod rdp;
 pub mod resume;
 pub mod secure;
 pub mod shortcut;
+pub mod sizing;
 pub mod status;
 pub mod tui;
 pub mod vault;
