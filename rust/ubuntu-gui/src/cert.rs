@@ -82,7 +82,10 @@ pub fn generate_self_signed(subject: &str, years: u32) -> Result<GeneratedCert, 
 /// `0x8009200B`. O caminho anterior (rcgen gera ECDSA, e o add via DER nao
 /// persiste chave) produzia um cert inutil para assinatura.
 #[cfg(windows)]
-pub fn ensure_publisher_certificate(subject: &str, years: u32) -> Result<String, InstallError> {
+pub fn ensure_publisher_certificate(
+    subject: &str,
+    years: u32,
+) -> Result<(String, PublisherTrust), InstallError> {
     use std::os::windows::process::CommandExt;
     // CREATE_NO_WINDOW = 0x08000000: sem flash de console (como `wsl_cmd`).
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -100,8 +103,11 @@ pub fn ensure_publisher_certificate(subject: &str, years: u32) -> Result<String,
         .output()
         .map_err(InstallError::from)?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    if let Some(tp) = parse_thumbprint_output(&stdout) {
-        return Ok(tp);
+    if let (Some(tp), Some(trust)) = (
+        parse_thumbprint_output(&stdout),
+        parse_publisher_trust_output(&stdout),
+    ) {
+        return Ok((tp, trust));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     let mut tail: Vec<String> = stdout
@@ -202,16 +208,41 @@ pub fn ensure_tls_trusted(pem: &str) -> Result<TlsTrust, InstallError> {
     )))
 }
 
+/// Resultado da confianca no publicador (para a mensagem do passo 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublisherTrust {
+    TrustedNow,
+    AlreadyTrusted,
+}
+
 /// Script find-or-create do publicador (mesma primitiva do PS legado, numa
 /// unica chamada): reaproveita de `My` por Subject exato **com chave
-/// privada** ou cria CodeSigning autoassinado em `My` + `TrustedPublisher`.
-/// O `HasPrivateKey` descarta o cert sem chave que o caminho antigo (DER
-/// sem chave) deixou no store — sem ele o `rdpsign` seguiria falhando.
-/// Imprime `UBUNTUGUI_THUMBPRINT=<40 hex>`; sem CRLF (vai no argv).
+/// privada** ou cria CodeSigning autoassinado em `My`; depois garante a
+/// presenca em `TrustedPublisher` (o reuso antigo pulava essa gravacao e o
+/// mstsc acusava fornecedor desconhecido mesmo com o `.rdp` assinado).
+/// Limpa as sobras sem chave do caminho antigo (DER sem chave: o `rdpsign`
+/// recusa com `0x8009200B`).
+/// Imprime `UBUNTUGUI_THUMBPRINT=<40 hex>` + `UBUNTUGUI_TRUST=TRUSTED|PRESENT`;
+/// sem CRLF (vai no argv).
 pub fn publisher_cert_script(subject: &str, years: u32) -> String {
     format!(
-        "$c = Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -eq '{subject}' -and $_.HasPrivateKey }} | Select-Object -First 1; if (-not $c) {{ $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddYears({years}); $s = New-Object Security.Cryptography.X509Certificates.X509Store('TrustedPublisher','CurrentUser'); $s.Open('ReadWrite'); $s.Add($c); $s.Close() }}; 'UBUNTUGUI_THUMBPRINT=' + $c.Thumbprint"
+        "$all=@(Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert -ErrorAction SilentlyContinue|Where-Object {{ $_.Subject -eq '{subject}' }});$all|Where-Object {{ -not $_.HasPrivateKey }}|ForEach-Object {{ try {{ $_|Remove-Item -ErrorAction Stop }}catch {{}} }};$c=@($all|Where-Object {{ $_.HasPrivateKey }})|Select-Object -First 1;if(-not $c) {{ $c=New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddYears({years}) }};$s=New-Object Security.Cryptography.X509Certificates.X509Store('TrustedPublisher','CurrentUser');$s.Open('ReadWrite');$known=@($s.Certificates|Where-Object {{ $_.Thumbprint -eq $c.Thumbprint }}).Count -gt 0;if(-not $known) {{ $s.Add($c);$m='TRUSTED' }}else {{ $m='PRESENT' }};$s.Close();'UBUNTUGUI_THUMBPRINT='+$c.Thumbprint;'UBUNTUGUI_TRUST='+$m"
     )
+}
+
+/// Parser fail-closed do estado de confianca (`TRUSTED` = gravou agora;
+/// `PRESENT` = ja confiavel).
+pub fn parse_publisher_trust_output(out: &str) -> Option<PublisherTrust> {
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("UBUNTUGUI_TRUST=") {
+            match rest.trim() {
+                "TRUSTED" => return Some(PublisherTrust::TrustedNow),
+                "PRESENT" => return Some(PublisherTrust::AlreadyTrusted),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// Parser fail-closed do marcador (40 hex; `.NET Thumbprint` ja e
@@ -297,7 +328,10 @@ fn sha1(data: &[u8]) -> [u8; 20] {
 /// Fora do Windows nao ha cert store: so gerar (rcgen) e erro tipado no
 /// `ensure`.
 #[cfg(not(windows))]
-pub fn ensure_publisher_certificate(_subject: &str, _years: u32) -> Result<String, InstallError> {
+pub fn ensure_publisher_certificate(
+    _subject: &str,
+    _years: u32,
+) -> Result<(String, PublisherTrust), InstallError> {
     Err(InstallError::NotSupportedOnLinux(
         "cert store CurrentUser\\My",
     ))
@@ -350,7 +384,25 @@ mod tests {
         // Store real (singular): o plural abre um custom que o mstsc ignora.
         assert!(s.contains("'TrustedPublisher'"));
         assert!(!s.contains("TrustedPublishers"));
+        // Reuso tambem confia (senao o mstsc seguia acusando mesmo assinado).
+        assert!(s.contains("UBUNTUGUI_TRUST="));
+        // Sobras sem chave do caminho antigo sao purgadas (rdpsign 0x8009200B).
+        assert!(s.contains("Remove-Item"));
         assert!(!s.contains('\r'), "CRLF quebraria o argv do powershell");
+    }
+
+    #[test]
+    fn publisher_trust_parses_and_rejects_garbage() {
+        assert_eq!(
+            parse_publisher_trust_output("UBUNTUGUI_TRUST=TRUSTED"),
+            Some(PublisherTrust::TrustedNow)
+        );
+        assert_eq!(
+            parse_publisher_trust_output("x\nUBUNTUGUI_TRUST=PRESENT\n"),
+            Some(PublisherTrust::AlreadyTrusted)
+        );
+        assert_eq!(parse_publisher_trust_output("UBUNTUGUI_TRUST=MAYBE"), None);
+        assert_eq!(parse_publisher_trust_output("nada aqui"), None);
     }
 
     #[test]

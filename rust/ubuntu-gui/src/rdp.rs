@@ -18,7 +18,8 @@ pub fn new_rdp_file_content(
     resolution: &str,
 ) -> Vec<String> {
     let mut rdp = vec![
-        "screen mode id:i:2".to_string(),
+        // 1 = janela (2 = tela cheia); paridade com o PS — maximizar continua possivel.
+        "screen mode id:i:1".to_string(),
         "session bpp:i:32".to_string(),
     ];
     if let Some((w, h)) = split_resolution(resolution) {
@@ -166,7 +167,7 @@ mod tests {
         assert_eq!(
             sample(),
             vec![
-                "screen mode id:i:2",
+                "screen mode id:i:1",
                 "session bpp:i:32",
                 "desktopwidth:i:1600",
                 "desktopheight:i:900",

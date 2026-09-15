@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "3dccd2a6b144"
+$SCRIPT_BUILD = "46b94f18f41d"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -709,6 +709,7 @@ if exist "%SystemRoot%\Sysnative\cmd.exe" set SYS32=%SystemRoot%\Sysnative
 set WSL=%SYS32%\wsl.exe
 set MSTSC=%SYS32%\mstsc.exe
 set RDPPATH=%LOCALAPPDATA%\Programs\APP_NAME\APP_NAME.rdp
+set RUNRDP=%TEMP%\APP_NAME-run.rdp
 set CREDHELPER=%LOCALAPPDATA%\Programs\APP_NAME\APP_NAME-Cred.ps1
 if not exist "%WSL%" (echo ERRO: wsl.exe nao encontrado em %WSL% & pause & exit /b 1)
 rem Sem mstsc, abre pelo cliente reserva no WSL (vazio = sem reserva, erro abaixo)
@@ -721,12 +722,14 @@ if "%WSL_IP%"=="" (
   exit /b 1
 )
 %WSL% -d %DISTRO% -u LINUXUSER_VAL --exec env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start SHELLSVC_VAL RDPSVC_VAL.service >nul 2>&1
+rem Copia por clique: o mstsc reescreve o .rdp que abre e invalidava a assinatura
+copy /y "%RDPPATH%" "%RUNRDP%" >nul
 RDPREWRITE_VAL
 rem Sem arquivo no caminho diario: credencial no Cofre do Windows (sem aviso de
 rem fornecedor). Se falhar, volta ao .rdp (comportamento anterior, nunca pior).
 if not exist "%MSTSC%" goto :FREERDP
-powershell -NoProfile -ExecutionPolicy Bypass -File "%CREDHELPER%" "%RDPPATH%" "%WSL_IP%" RDP_PORT_VAL >nul 2>&1
-if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL /w:RDP_W_VAL /h:RDP_H_VAL)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%CREDHELPER%" "%RUNRDP%" "%WSL_IP%" RDP_PORT_VAL >nul 2>&1
+if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RUNRDP%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL /w:RDP_W_VAL /h:RDP_H_VAL)
 goto :ENDLAUNCH
 :FREERDP
 %WSL% -d %DISTRO% -u LINUXUSER_VAL -- FREERDP_VAL "W_RDP_VAL"
@@ -801,16 +804,26 @@ function Clear-ResumeState([string]$RunOncePath, [string]$RunOnceName, [string]$
 # Certificado de publicador p/ assinar o .rdp (some o aviso "fornecedor desconhecido").
 # Idempotente: reaproveita se ja existir no CurrentUser\My.
 function New-PublisherCertificate([string]$Subject = $script:UbuntuGuiDefaults.PublisherSubject) {
-  # So reaproveita com chave privada (cert sem chave nao assina: rdpsign 0x8009200B).
-  $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
-    Where-Object { $_.Subject -eq $Subject -and $_.HasPrivateKey } | Select-Object -First 1
-  if ($cert) { return $cert }
-  $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $Subject `
-    -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears($script:UbuntuGuiDefaults.CertYears)
+  $all = @(Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -eq $Subject })
+  # So reaproveita com chave privada (cert sem chave nao assina: rdpsign 0x8009200B):
+  # limpa as sobras do caminho antigo.
+  $all | Where-Object { -not $_.HasPrivateKey } | ForEach-Object { try { $_ | Remove-Item -ErrorAction Stop } catch {} }
+  $cert = @($all | Where-Object { $_.HasPrivateKey }) | Select-Object -First 1
+  if (-not $cert) {
+    $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $Subject `
+      -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears($script:UbuntuGuiDefaults.CertYears)
+  }
   # Store real no singular (o plural abre um custom que o mstsc ignora).
+  # Vale tambem no reuso: sem essa gravacao o mstsc acusava fornecedor
+  # desconhecido mesmo com o .rdp assinado.
   $store = New-Object Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
-  $store.Open("ReadWrite"); $store.Add($cert); $store.Close()
-  Ok "Publicador confiavel criado"
+  $store.Open("ReadWrite")
+  try {
+    $known = @($store.Certificates | Where-Object { $_.Thumbprint -eq $cert.Thumbprint }).Count -gt 0
+    if (-not $known) { $store.Add($cert); Ok "Publicador confiavel criado" }
+    else { Ok "Publicador ja confiavel" }
+  } finally { $store.Close() }
   return $cert
 }
 function Install-WslUbuntuGui {
@@ -1486,8 +1499,8 @@ else { Ok "RDP via IP dinamico (cada clique detecta sozinho)" }
 $discBlock = if ($LocalhostLive) { 'rem IP fixo via mirrored networking (127.0.0.1)' }
   else { 'rem IP descoberto automaticamente a cada clique (hostname -I)' + "`r`n" + 'for /f "tokens=1" %%i in (''%WSL% -d %DISTRO% -- hostname -I 2^>nul'') do set WSL_IP=%%i' }
 # Fixo: nao reescreve o .rdp (assinatura continua valida). Dinamico: reescreve + reassina SO se o IP mudou (sem churn: o "nao perguntar de novo" do mstsc sobrevive entre cliques).
-$rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - .rdp assinado, nao alterar' }
-  else { 'for /f "tokens=3,4 delims=:" %%a in (''findstr /B "full address:s:" ''%RDPPATH%'' '') do set RDP_CUR=%%a:%%b' + "`r`n" + 'if not "%RDP_CUR%"=="%WSL_IP%:RDP_PORT_VAL" powershell -NoProfile -Command "$c = Get-Content ''%RDPPATH%''; if ($c -match ''^full address:s:'') { $c -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; if (Test-Path ''%SYS32%\rdpsign.exe'') { & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1 } }"' }
+$rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - copia assinada por clique, nao alterar' }
+  else { 'for /f "tokens=3,4 delims=:" %%a in (''findstr /B "full address:s:" ''%RUNRDP%'' '') do set RDP_CUR=%%a:%%b' + "`r`n" + 'if not "%RDP_CUR%"=="%WSL_IP%:RDP_PORT_VAL" powershell -NoProfile -Command "$c = Get-Content ''%RUNRDP%''; if ($c -match ''^full address:s:'') { $c -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RUNRDP%''; if (Test-Path ''%SYS32%\rdpsign.exe'') { & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RUNRDP%'' >nul 2>&1 } }"' }
 $rdpW = 1600; $rdpH = 900
 if ($RES -match '^(\d+)x(\d+)$') { $rdpW = [int]$Matches[1]; $rdpH = [int]$Matches[2] }
 $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `

@@ -1240,7 +1240,14 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     } else {
         rep.ok("Icone ja existia");
     }
-    let pub_cert_tp = cert::ensure_publisher_certificate(&d.publisher_subject, d.cert_years)?;
+    let (pub_cert_tp, pub_trust) =
+        cert::ensure_publisher_certificate(&d.publisher_subject, d.cert_years)?;
+    match pub_trust {
+        cert::PublisherTrust::TrustedNow => {
+            rep.ok("Publicador confiavel (sem aviso de fornecedor)")
+        }
+        cert::PublisherTrust::AlreadyTrusted => rep.ok("Publicador ja confiavel"),
+    }
     let localhost_live = if use_mirrored {
         std::net::TcpStream::connect_timeout(
             &format!("127.0.0.1:{rdp_port}")

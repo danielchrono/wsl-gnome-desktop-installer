@@ -9,7 +9,10 @@ use crate::constants::defaults;
 
 /// Template byte-identico ao here-string do PowerShell (LF; comeca e termina
 /// com `\n` como o bloco `@'...'@`).
-pub const LAUNCHER_TEMPLATE: &str = "\n@echo off\nrem APP_NAME - liga o WSL, garante desktop+RDP e abre o mstsc\nsetlocal\nset DISTRO=DISTRO_VAL\nset WSL=C:\\Windows\\System32\\wsl.exe\nset MSTSC=C:\\Windows\\System32\\mstsc.exe\nset RDPPATH=%LOCALAPPDATA%\\Programs\\APP_NAME\\APP_NAME.rdp\nset WSL_IP=127.0.0.1\nIPDISCOVERY_VAL\nif \"%WSL_IP%\"==\"\" (\n  echo Nao foi possivel iniciar o Ubuntu no WSL.\n  pause\n  exit /b 1\n)\n%WSL% -d %DISTRO% -u LINUXUSER_VAL --exec env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start SHELLSVC_VAL RDPSVC_VAL.service >nul 2>&1\nRDPREWRITE_VAL\nstart \"APP_NAME\" \"%MSTSC%\" \"%RDPPATH%\"\n";
+/// Abre uma COPIA por clique (`RUNRDP`): o mstsc grava estado de sessao de
+/// volta no `.rdp` que abre (ex.: modo de tela), e qualquer byte diferente
+/// invalida a assinatura — o original assinado fica intacto para sempre.
+pub const LAUNCHER_TEMPLATE: &str = "\n@echo off\nrem APP_NAME - liga o WSL, garante desktop+RDP e abre o mstsc\nsetlocal\nset DISTRO=DISTRO_VAL\nset WSL=C:\\Windows\\System32\\wsl.exe\nset MSTSC=C:\\Windows\\System32\\mstsc.exe\nset RDPPATH=%LOCALAPPDATA%\\Programs\\APP_NAME\\APP_NAME.rdp\nset RUNRDP=%TEMP%\\APP_NAME-run.rdp\nset WSL_IP=127.0.0.1\nIPDISCOVERY_VAL\nif \"%WSL_IP%\"==\"\" (\n  echo Nao foi possivel iniciar o Ubuntu no WSL.\n  pause\n  exit /b 1\n)\n%WSL% -d %DISTRO% -u LINUXUSER_VAL --exec env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start SHELLSVC_VAL RDPSVC_VAL.service >nul 2>&1\ncopy /y \"%RDPPATH%\" \"%RUNRDP%\" >nul\nRDPREWRITE_VAL\nstart \"APP_NAME\" \"%MSTSC%\" \"%RUNRDP%\"\n";
 
 /// Bloco de descoberta quando o localhost ja vale (mirrored + RDP de pe).
 pub fn discovery_block_fixed() -> String {
@@ -21,15 +24,16 @@ pub fn discovery_block_dynamic() -> String {
     "rem IP descoberto automaticamente a cada clique (hostname -I)\r\nfor /f \"tokens=1\" %%i in ('%WSL% -d %DISTRO% -- hostname -I 2^>nul') do set WSL_IP=%%i".to_string()
 }
 
-/// Bloco fixo: nao reescreve o `.rdp` (assinatura continua valida).
+/// Bloco fixo: nao reescreve a copia (assinatura continua valida).
 pub fn rewrite_block_fixed() -> String {
-    "rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - .rdp assinado, nao alterar"
+    "rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - copia assinada, nao alterar"
         .to_string()
 }
 
-/// Bloco dinamico: reescreve o `.rdp` + reassina via `rdpsign`.
+/// Bloco dinamico: reescreve a COPIA + reassina via `rdpsign` (o original
+/// nunca e tocado no clique).
 pub fn rewrite_block_dynamic() -> String {
-    "powershell -NoProfile -Command \"(Get-Content '%RDPPATH%') -replace '^full address:s:.*','full address:s:%WSL_IP%:RDP_PORT_VAL' | Set-Content '%RDPPATH%'; & %SystemRoot%\\System32\\rdpsign.exe /sha256 THUMBPRINT_VAL '%RDPPATH%' >nul 2>&1\"".to_string()
+    "powershell -NoProfile -Command \"(Get-Content '%RUNRDP%') -replace '^full address:s:.*','full address:s:%WSL_IP%:RDP_PORT_VAL' | Set-Content '%RUNRDP%'; & %SystemRoot%\\System32\\rdpsign.exe /sha256 THUMBPRINT_VAL '%RUNRDP%' >nul 2>&1\"".to_string()
 }
 
 /// `New-LauncherContent`: troca todos os placeholders, nesta ordem.
@@ -126,10 +130,33 @@ mod tests {
     }
 
     #[test]
+    fn click_opens_a_copy_never_the_signed_original() {
+        // O mstsc grava estado de sessao no .rdp que abre: abrir o original
+        // invalidava a assinatura no primeiro clique.
+        for local in [true, false] {
+            let c =
+                launcher_for_endpoint("Ubuntu-GUI", "Ubuntu", "daniel", 3390, "ABC123", local);
+            assert!(c.contains("copy /y \"%RDPPATH%\" \"%RUNRDP%\""), "sem copia: {c}");
+            assert!(
+                c.contains("start \"Ubuntu-GUI\" \"%MSTSC%\" \"%RUNRDP%\""),
+                "abre o original: {c}"
+            );
+            // Ler o original como fonte da copia pode; escrever, nunca.
+            assert!(
+                !c.contains("Set-Content '%RDPPATH%'"),
+                "original reescrito no clique: {c}"
+            );
+        }
+    }
+
+    #[test]
     fn dynamic_endpoint_rewrites_and_resigns() {
         let c = launcher_for_endpoint("Ubuntu-GUI", "Ubuntu", "daniel", 3390, "ABC123", false);
         assert!(c.contains("full address:s:%WSL_IP%:3390"));
         assert!(c.contains("rdpsign.exe /sha256 ABC123"));
         assert!(c.contains("hostname -I 2^>nul"));
+        // Reescrita e reassinatura na COPIA (o original fica intacto).
+        assert!(c.contains("'%RUNRDP%'"));
+        assert!(!c.contains("'%RDPPATH%'"));
     }
 }

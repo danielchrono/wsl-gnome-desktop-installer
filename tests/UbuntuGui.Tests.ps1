@@ -104,6 +104,11 @@ Describe 'New-LauncherContent' {
     $c | Should Match '/v:'
     $c | Should Match '/w:1600'
   }
+  It 'abre copia por clique (mstsc nao invalida o original)' {
+    $c | Should Match 'RUNRDP'
+    $c | Should Match 'copy /y'
+    $c | Should Match '"%MSTSC%" "%RUNRDP%"'
+  }
 }
 
 Describe 'Test-LinuxUserName' {

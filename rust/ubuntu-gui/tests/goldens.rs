@@ -10,7 +10,7 @@ fn rdp_line_order_golden() {
         ubuntu_gui::rdp::new_rdp_file_content("127.0.0.1", 3390, "daniel", "aabb", "1600x900");
     let text = rdp.join("\n");
     let order = [
-        "screen mode id:i:2",
+        "screen mode id:i:1",
         "session bpp:i:32",
         "desktopwidth:i:1600",
         "desktopheight:i:900",
