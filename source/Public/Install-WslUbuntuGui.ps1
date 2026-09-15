@@ -408,7 +408,7 @@ if ($uk.State -ne 'Unlocked') {
     if (Test-WslUnlockExitMeaningful -LinuxUser $LinuxUser -Uid $Uid) {
       Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo com UMA senha definitiva"
     } else {
-      Fail "Unlock por stdin nao valida senha neste sistema (teste de controle com senha falsa tambem saiu 0; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha aberto e rode de novo"
+      Fail "Unlock por stdin nao destrava neste sistema (gnome-keyring 50: senha falsa tambem sai 0 e recriar via PAM tambem fica trancado; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo. So em ultimo caso, com backup: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak e rode de novo"
     }
     throw "Cofre bloqueado"
   }

@@ -227,7 +227,7 @@ function Get-WslKeyringLockDetail([string]$LinuxUser, [string]$Uid) {
   $envPrefix = New-WslSessionEnv -Uid $Uid
   $login = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login org.freedesktop.Secret.Collection Locked 2>&1"
   $files = Invoke-Wsl $LinuxUser "ls ~/.local/share/keyrings/ 2>/dev/null || echo SEM-DIR"
-  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -c gnome-keyring-daemon 2>/dev/null); echo daemons=`$daemons"
+  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -fc 'gnome-keyring-daemon' 2>/dev/null); echo daemons=`$daemons"
   $loginOut = if ($login.Out) { $login.Out.Trim() } else { '(vazio)' }
   $filesOut = if ($files.Out) { $files.Out.Trim() } else { '(vazio)' }
   $daemonOut = if ($daemons.Out) { $daemons.Out.Trim() } else { '(vazio)' }
@@ -987,7 +987,7 @@ if ($uk.State -ne 'Unlocked') {
     if (Test-WslUnlockExitMeaningful -LinuxUser $LinuxUser -Uid $Uid) {
       Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo com UMA senha definitiva"
     } else {
-      Fail "Unlock por stdin nao valida senha neste sistema (teste de controle com senha falsa tambem saiu 0; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha aberto e rode de novo"
+      Fail "Unlock por stdin nao destrava neste sistema (gnome-keyring 50: senha falsa tambem sai 0 e recriar via PAM tambem fica trancado; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo. So em ultimo caso, com backup: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak e rode de novo"
     }
     throw "Cofre bloqueado"
   }

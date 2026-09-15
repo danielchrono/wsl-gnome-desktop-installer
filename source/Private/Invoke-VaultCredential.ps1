@@ -117,7 +117,7 @@ function Get-WslKeyringLockDetail([string]$LinuxUser, [string]$Uid) {
   $envPrefix = New-WslSessionEnv -Uid $Uid
   $login = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login org.freedesktop.Secret.Collection Locked 2>&1"
   $files = Invoke-Wsl $LinuxUser "ls ~/.local/share/keyrings/ 2>/dev/null || echo SEM-DIR"
-  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -c gnome-keyring-daemon 2>/dev/null); echo daemons=`$daemons"
+  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -fc 'gnome-keyring-daemon' 2>/dev/null); echo daemons=`$daemons"
   $loginOut = if ($login.Out) { $login.Out.Trim() } else { '(vazio)' }
   $filesOut = if ($files.Out) { $files.Out.Trim() } else { '(vazio)' }
   $daemonOut = if ($daemons.Out) { $daemons.Out.Trim() } else { '(vazio)' }

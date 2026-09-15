@@ -108,10 +108,10 @@ check('novos helpers no build', 'function ConvertFrom-SecureStringPlain' in src 
 check('sonda do cofre classifica Locked vs Error', 'function Get-WslKeyringProbeState' in src and "'Unlocked'" in src and "'Locked'" in src and "'Error'" in src)
 check('falha do cofre mostra evidencia (unlock + sonda)', 'unlock disse:' in src and 'Sonda do cofre falhou' in src and 'Cofre destravou na re-sonda' in src)
 check('re-sonda limitada (sem retry cego)', 'KeyringReprobeSec' in src and 'Start-Sleep -Seconds $KeyringReprobeSec' in src)
-check('falha Locked traz detalhe (login/arquivos/daemons)', 'function Get-WslKeyringLockDetail' in src and 'collection/login' in src and 'pgrep -c gnome-keyring-daemon' in src)
+check('falha Locked traz detalhe (login/arquivos/daemons)', 'function Get-WslKeyringLockDetail' in src and 'collection/login' in src and "pgrep -fc 'gnome-keyring-daemon'" in src and 'pgrep -c gnome-keyring-daemon' not in src)
 check('unlock+sonda mesma chamada (daemon efemero)', 'function UnlockAndProbe-WslKeyring' in src and 'function Read-UnlockProbeOutput' in src and 'UBUNTUGUI_UNLOCKCODE=' in src and 'UBUNTUGUI_PROBE=' in src)
 check('unlock/sonda via builders unicos', 'function Get-WslUnlockPipeline' in src and 'function Get-WslKeyringProbeCommand' in src and install_src.count('UnlockAndProbe-WslKeyring -LinuxUser') == 2 and 'Unlock-WslKeyring -LinuxUser' not in install_src)
 check('pula unlock se PAM destravou + guia seahorse', 'Cofre ja destravado via PAM (pulando unlock)' in src and 'seahorse' in src and '$pamUnlocked' in install_src)
-check('teste de controle decide senha-errada vs unlock-quebrado', 'function Test-WslUnlockExitMeaningful' in src and 'ubuntugui-sonda-falsa-000' in src and 'Senha incorreta para o cofre existente' in src and 'nao valida senha neste sistema' in src)
+check('teste de controle decide senha-errada vs unlock-quebrado', 'function Test-WslUnlockExitMeaningful' in src and 'ubuntugui-sonda-falsa-000' in src and 'Senha incorreta para o cofre existente' in src and 'nao destrava neste sistema' in src)
 
 sys.exit(1 if fails else 0)
