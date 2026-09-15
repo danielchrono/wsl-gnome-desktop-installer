@@ -1,5 +1,5 @@
 try {
-  Install-WslUbuntuGui -Resume:$Resume
+  Install-WslUbuntuGui -Resume:$Resume -Unattended:$Unattended
   exit 0
 } catch {
   # Sem eco duplicado: falha controlada ja imprimiu [FALHA] com detalhe.

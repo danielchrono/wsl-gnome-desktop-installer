@@ -46,3 +46,23 @@ function Resolve-UserMenuChoice {
   if ([string]::IsNullOrWhiteSpace($TypedName)) { return $DefaultUser }
   return $TypedName
 }
+
+# Resposta ao prompt de reboot ('[S/n]', padrao sim): vazio ou comeca com 's'.
+# Pura (espelha o canon: mesma regra do instalador Rust).
+function Test-RebootAnswer {
+  [CmdletBinding()]
+  param([string]$Answer)
+  if ([string]::IsNullOrWhiteSpace($Answer)) { return $true }
+  return $Answer.Trim().ToLower().StartsWith("s")
+}
+
+# Fail-fast do -Unattended (puro): sem terminal, sem pergunta - usuario e senha
+# tem que vir de parametro (-LinuxUser e -LinuxPassword); rede cai no padrao.
+function Test-UnattendedInput {
+  [CmdletBinding()]
+  param([string]$LinuxUser, [bool]$HasPassword)
+  if ([string]::IsNullOrWhiteSpace($LinuxUser) -or (-not $HasPassword)) {
+    return @{ Ok = $false; Reason = 'missing-credentials' }
+  }
+  return @{ Ok = $true; Reason = '' }
+}

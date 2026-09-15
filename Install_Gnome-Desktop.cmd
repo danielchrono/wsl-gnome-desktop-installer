@@ -3,13 +3,13 @@ rem Instalador Ubuntu GUI em ARQUIVO UNICO: extrai o PowerShell embutido
 rem abaixo (texto claro, auditavel) para a pasta TEMP e executa.
 setlocal
 powershell -NoProfile -Command "$a=':::PS1-BODY'+'-START'; $b=':::PS1-BODY'+'-END'; $t=[IO.File]::ReadAllText('%~f0') -split $a; $u=$t[1] -split $b; [IO.File]::WriteAllText('%TEMP%\Install-UbuntuGUI.ps1',$u[0].Trim() + [char]10)"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\Install-UbuntuGUI.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\Install-UbuntuGUI.ps1" %*
 echo.
 pause
 exit /b 0
 :::PS1-BODY-START
 [CmdletBinding()]
-param([switch]$Resume)
+param([switch]$Resume, [switch]$Unattended)
 $SCRIPT_VERSION = "0.1.0"
 try { Start-Transcript -Path (Join-Path $env:TEMP 'Ubuntu-GUI-install.log') -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -418,6 +418,26 @@ function Resolve-UserMenuChoice {
   if ([string]::IsNullOrWhiteSpace($TypedName)) { return $DefaultUser }
   return $TypedName
 }
+
+# Resposta ao prompt de reboot ('[S/n]', padrao sim): vazio ou comeca com 's'.
+# Pura (espelha o canon: mesma regra do instalador Rust).
+function Test-RebootAnswer {
+  [CmdletBinding()]
+  param([string]$Answer)
+  if ([string]::IsNullOrWhiteSpace($Answer)) { return $true }
+  return $Answer.Trim().ToLower().StartsWith("s")
+}
+
+# Fail-fast do -Unattended (puro): sem terminal, sem pergunta - usuario e senha
+# tem que vir de parametro (-LinuxUser e -LinuxPassword); rede cai no padrao.
+function Test-UnattendedInput {
+  [CmdletBinding()]
+  param([string]$LinuxUser, [bool]$HasPassword)
+  if ([string]::IsNullOrWhiteSpace($LinuxUser) -or (-not $HasPassword)) {
+    return @{ Ok = $false; Reason = 'missing-credentials' }
+  }
+  return @{ Ok = $true; Reason = '' }
+}
 # View TUI nativa (MVVM): so render + leitura de tecla, sem decisao de instalacao.
 # Zero dependencia (Windows PowerShell 5.1 inbox). Com fallback Read-Host quando
 # nao ha console interativo (pipe, -NoTui, hosts sem UI). Logica de indice pura
@@ -678,6 +698,7 @@ function Install-WslUbuntuGui {
 .EXECUCAO (modulo)
   Install-WslUbuntuGui                       # interativo (pergunta tudo)
   Install-WslUbuntuGui -LinuxUser daniel -NetChoice 1 -Resume
+  Install-WslUbuntuGui -Unattended -LinuxUser daniel -LinuxPassword $sec -NetChoice 1  # sem paradas (reboot sozinho)
 
 .O QUE FAZ (tudo validado numa instalacao real Ubuntu 26.04 + GNOME 50)
   1. Habilita o WSL (wsl --install) e instala a distro (reinicia se preciso)
@@ -698,7 +719,8 @@ param(
   [string]$FallbackResolution,
   [int]$RdpPort,
   [string]$AppName,
-  [switch]$NoTui
+  [switch]$NoTui,
+  [switch]$Unattended
 )
 # (padroes em source/Private/UbuntuGui-Constants.ps1 - sem defaults aqui; ViewModel)
 
@@ -800,6 +822,16 @@ if ($Resume -and (Test-Path $ResumeFile)) {
   }
 }
 if (-not $Resume) {
+  # Fail-fast do -Unattended: sem terminal, sem pergunta - tudo tem que vir de
+  # parametro (rede cai no padrao abaixo); nome passa pela mesma validacao do
+  # interativo (espelha o canon do instalador Rust).
+  if ($Unattended) {
+    $upFront = if ($LinuxPassword) { ConvertFrom-SecureStringPlain $LinuxPassword } else { '' }
+    $credCheck = Test-UnattendedInput -LinuxUser $LinuxUser -HasPassword (-not [string]::IsNullOrEmpty($upFront))
+    if (-not $credCheck.Ok) {
+      Fail "-Unattended exige -LinuxUser e -LinuxPassword (opcional: -NetChoice 1|2)"; throw "Credenciais unattended ausentes"
+    }
+  }
   # Usuario/senha Linux (reaproveita padrao Ubuntu: minusculas, sem espaco).
   # O nome fica salvo entre runs: na 1a instalacao ele sera o usuario criado pelo script
   # (nao precisa digitar no instalador do Ubuntu); nos reruns ele ja vem pronto.
@@ -843,7 +875,8 @@ if (-not $Resume) {
   # estavel, sem redescoberta, assinatura do .rdp sempre valida) ou [2] IP dinamico
   # descoberto automaticamente a cada clique (p/ Windows sem mirrored).
   # View (TUI com fallback Read-Host); regra pura em Resolve-NetworkChoice.
-  if ([string]::IsNullOrWhiteSpace($NetChoice)) {
+  # -Unattended pula o prompt: vazio cai no padrao mirrored via Resolve-NetworkChoice.
+  if ([string]::IsNullOrWhiteSpace($NetChoice) -and (-not $Unattended)) {
     if (Test-TuiAvailable -NoTui:$NoTui) {
       $menuIdx = Show-SingleChoiceMenu -Title "Modo de rede" `
         -Options @('localhost fixo 127.0.0.1 (recomendado)', 'IP dinamico a cada clique') `
@@ -870,15 +903,21 @@ Step "1/7 WSL, rede e distro $DISTRO"
 $distros = ConvertFrom-WslDistroList (wsl -l -q 2>$null)
 if ($distros -notcontains $DISTRO) {
   Write-Host "  Instalando WSL + $DISTRO..." -ForegroundColor Yellow
-  wsl --install -d $DISTRO
-  Write-Host "  Nao abra o app Ubuntu: o script cria o usuario '$LinuxUser' sozinho (sem digitar no instalador do Ubuntu)" -ForegroundColor Yellow
+  wsl --install -d $DISTRO --no-launch
+  Write-Host "  Sem prompt duplo: o Ubuntu instala sem abrir (o usuario '$LinuxUser' e criado sozinho na etapa 2)" -ForegroundColor Yellow
   Start-Sleep -Seconds $FreshWaitSec
   wsl -d $DISTRO -- true 2>$null
   if ($LASTEXITCODE -eq 0) { Ok "WSL pronto sem reboot - seguindo sozinho" }
   else {
     Save-ResumeState $PSCommandPath $ProgDir $ResumeFile $ResumePs1 $RunOncePath $RunOnceName $LinuxUser $LinuxPass $NetChoice
-    $rb = Read-Host "Reiniciar o Windows agora para continuar sozinho? [S/n]"
-    if ([string]::IsNullOrWhiteSpace($rb) -or $rb.Trim().ToLower().StartsWith("s")) {
+    if ($Unattended) {
+      Write-Host "  Modo nao assistido: reiniciando sozinho para continuar..." -ForegroundColor Yellow
+      $rebootNow = $true
+    } else {
+      $rb = Read-Host "Reiniciar o Windows agora para continuar sozinho? [S/n]"
+      $rebootNow = Test-RebootAnswer -Answer $rb
+    }
+    if ($rebootNow) {
       Write-Host "  Reiniciando em ${RebootDelaySec}s (cancele com: shutdown /a)..." -ForegroundColor Yellow
       shutdown /r /t $RebootDelaySec /c "Ubuntu-GUI: reiniciando p/ continuar a instalacao sozinho"
     } else {
@@ -1269,7 +1308,7 @@ return [pscustomobject]@{
 }
 }
 try {
-  Install-WslUbuntuGui -Resume:$Resume
+  Install-WslUbuntuGui -Resume:$Resume -Unattended:$Unattended
   exit 0
 } catch {
   # Sem eco duplicado: falha controlada ja imprimiu [FALHA] com detalhe.

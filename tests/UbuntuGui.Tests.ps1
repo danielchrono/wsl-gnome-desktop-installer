@@ -587,3 +587,23 @@ Describe 'Get-WslIpAddress' {
     }) | Should Be '10.1.2.3'
   }
 }
+
+Describe 'Test-RebootAnswer' {
+  It 'vazio e S/sim = sim (padrao)' {
+    (& (Get-Module UbuntuGui) { Test-RebootAnswer -Answer '' }) | Should Be $true
+    (& (Get-Module UbuntuGui) { Test-RebootAnswer -Answer 'S' }) | Should Be $true
+    (& (Get-Module UbuntuGui) { Test-RebootAnswer -Answer 'sim' }) | Should Be $true
+  }
+  It 'n/nao = nao' {
+    (& (Get-Module UbuntuGui) { Test-RebootAnswer -Answer 'n' }) | Should Be $false
+    (& (Get-Module UbuntuGui) { Test-RebootAnswer -Answer 'Nao' }) | Should Be $false
+  }
+}
+
+Describe 'Test-UnattendedInput' {
+  It 'exige usuario e senha' {
+    (& (Get-Module UbuntuGui) { (Test-UnattendedInput -LinuxUser 'daniel' -HasPassword $true).Ok }) | Should Be $true
+    (& (Get-Module UbuntuGui) { (Test-UnattendedInput -LinuxUser '' -HasPassword $true).Reason }) | Should Be 'missing-credentials'
+    (& (Get-Module UbuntuGui) { (Test-UnattendedInput -LinuxUser 'daniel' -HasPassword $false).Reason }) | Should Be 'missing-credentials'
+  }
+}
