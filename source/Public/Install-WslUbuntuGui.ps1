@@ -59,6 +59,7 @@ $CredTimeoutSec  = $D.CredTimeoutSec
 $CredRetries     = $D.CredRetries
 $KeyringReprobeSec = $D.KeyringReprobeSec
 $AptRetries      = $D.AptRetries
+$PasswordMaxAttempts = $D.PasswordMaxAttempts
 $AptRetrySec     = $D.AptRetrySec
 $NetWaitTries    = $D.NetWaitTries
 $NetWaitSec      = $D.NetWaitSec
@@ -172,12 +173,17 @@ if (-not $Resume) {
   if ($LinuxPassword) {
     $LinuxPass = ConvertFrom-SecureStringPlain $LinuxPassword
   } else {
-    $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
-    $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
-    $LinuxPass = ConvertFrom-SecureStringPlain $sec1
-    $LinuxPass2 = ConvertFrom-SecureStringPlain $sec2
-    if ($LinuxPass -cne $LinuxPass2 -or [string]::IsNullOrEmpty($LinuxPass)) {
-      Fail "Senhas diferentes ou vazias - rode de novo"; throw "Senhas diferentes ou vazias"
+    # Retry: errar a confirmacao nao mata o run (fail-fast so apos N).
+    $LinuxPass = ''
+    for ($pa = 1; $pa -le $PasswordMaxAttempts; $pa++) {
+      $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
+      $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
+      $cand = ConvertFrom-SecureStringPlain $sec1
+      if (Test-PasswordConfirmation -First $cand -Second (ConvertFrom-SecureStringPlain $sec2)) { $LinuxPass = $cand; break }
+      if ($pa -lt $PasswordMaxAttempts) { Warn "Senhas diferentes ou vazias - tente de novo ($pa/$PasswordMaxAttempts)" }
+    }
+    if ([string]::IsNullOrEmpty($LinuxPass)) {
+      Fail "Senhas diferentes ou vazias apos $PasswordMaxAttempts tentativas - rode de novo"; throw "Senhas diferentes ou vazias"
     }
   }
   # $PWQ = senha pronta para embutir em 'bash -c "..."' (escapa bash + PowerShell)

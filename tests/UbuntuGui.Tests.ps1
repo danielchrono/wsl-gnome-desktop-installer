@@ -607,3 +607,14 @@ Describe 'Test-UnattendedInput' {
     (& (Get-Module UbuntuGui) { (Test-UnattendedInput -LinuxUser 'daniel' -HasPassword $false).Reason }) | Should Be 'missing-credentials'
   }
 }
+
+Describe 'Test-PasswordConfirmation' {
+  It 'iguais e nao-vazias = true (case-sensitive)' {
+    (& (Get-Module UbuntuGui) { Test-PasswordConfirmation -First 'abc123' -Second 'abc123' }) | Should Be $true
+    (& (Get-Module UbuntuGui) { Test-PasswordConfirmation -First 'Abc' -Second 'abc' }) | Should Be $false
+  }
+  It 'vazia nunca confirma' {
+    (& (Get-Module UbuntuGui) { Test-PasswordConfirmation -First '' -Second '' }) | Should Be $false
+    (& (Get-Module UbuntuGui) { Test-PasswordConfirmation -First '' -Second 'x' }) | Should Be $false
+  }
+}

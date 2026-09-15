@@ -27,6 +27,7 @@ $script:UbuntuGuiDefaults = @{
   CredRetries          = 2       # tentativas de gravacao no cofre
   KeyringReprobeSec    = 5       # espera antes da re-sonda (corrida de ativacao do D-Bus)
   AptRetries           = 3       # tentativas de apt install
+  PasswordMaxAttempts  = 3       # digitacao/confirmacao da senha (canon Rust)
   AptRetrySec          = 20      # espera entre tentativas de apt
   NetWaitTries         = 6       # sondas de DNS no WSL pos-reboot
   NetWaitSec           = 10      # espera entre sondas de DNS
@@ -441,6 +442,15 @@ function Test-UnattendedInput {
   }
   return @{ Ok = $true; Reason = '' }
 }
+
+# Confirmacao de senha: iguais (case-sensitive) E nao-vazias (vazia confirma
+# com vazia seria "match" - por isso o IsNullOrEmpty explicito). Pura.
+function Test-PasswordConfirmation {
+  [CmdletBinding()]
+  param([string]$First, [string]$Second)
+  if ([string]::IsNullOrEmpty($First)) { return $false }
+  return ($First -ceq $Second)
+}
 # View TUI nativa (MVVM): so render + leitura de tecla, sem decisao de instalacao.
 # Zero dependencia (Windows PowerShell 5.1 inbox). Com fallback Read-Host quando
 # nao ha console interativo (pipe, -NoTui, hosts sem UI). Logica de indice pura
@@ -756,6 +766,7 @@ $CredTimeoutSec  = $D.CredTimeoutSec
 $CredRetries     = $D.CredRetries
 $KeyringReprobeSec = $D.KeyringReprobeSec
 $AptRetries      = $D.AptRetries
+$PasswordMaxAttempts = $D.PasswordMaxAttempts
 $AptRetrySec     = $D.AptRetrySec
 $NetWaitTries    = $D.NetWaitTries
 $NetWaitSec      = $D.NetWaitSec
@@ -869,12 +880,17 @@ if (-not $Resume) {
   if ($LinuxPassword) {
     $LinuxPass = ConvertFrom-SecureStringPlain $LinuxPassword
   } else {
-    $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
-    $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
-    $LinuxPass = ConvertFrom-SecureStringPlain $sec1
-    $LinuxPass2 = ConvertFrom-SecureStringPlain $sec2
-    if ($LinuxPass -cne $LinuxPass2 -or [string]::IsNullOrEmpty($LinuxPass)) {
-      Fail "Senhas diferentes ou vazias - rode de novo"; throw "Senhas diferentes ou vazias"
+    # Retry: errar a confirmacao nao mata o run (fail-fast so apos N).
+    $LinuxPass = ''
+    for ($pa = 1; $pa -le $PasswordMaxAttempts; $pa++) {
+      $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
+      $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
+      $cand = ConvertFrom-SecureStringPlain $sec1
+      if (Test-PasswordConfirmation -First $cand -Second (ConvertFrom-SecureStringPlain $sec2)) { $LinuxPass = $cand; break }
+      if ($pa -lt $PasswordMaxAttempts) { Warn "Senhas diferentes ou vazias - tente de novo ($pa/$PasswordMaxAttempts)" }
+    }
+    if ([string]::IsNullOrEmpty($LinuxPass)) {
+      Fail "Senhas diferentes ou vazias apos $PasswordMaxAttempts tentativas - rode de novo"; throw "Senhas diferentes ou vazias"
     }
   }
   # $PWQ = senha pronta para embutir em 'bash -c "..."' (escapa bash + PowerShell)

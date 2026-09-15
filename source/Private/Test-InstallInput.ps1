@@ -66,3 +66,12 @@ function Test-UnattendedInput {
   }
   return @{ Ok = $true; Reason = '' }
 }
+
+# Confirmacao de senha: iguais (case-sensitive) E nao-vazias (vazia confirma
+# com vazia seria "match" - por isso o IsNullOrEmpty explicito). Pura.
+function Test-PasswordConfirmation {
+  [CmdletBinding()]
+  param([string]$First, [string]$Second)
+  if ([string]::IsNullOrEmpty($First)) { return $false }
+  return ($First -ceq $Second)
+}
