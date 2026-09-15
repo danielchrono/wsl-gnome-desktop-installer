@@ -106,16 +106,20 @@ pub fn gui_installed_check_command(gui_package: &str) -> String {
 }
 
 /// `apt-get update` via sudo com a senha no stdin.
+/// `apt` SEM `tail`: a barra nativa de download precisa de stream ao vivo
+/// (com `tail`, ~2 GB passam no escuro e so 2 linhas sobrevivem). Roda com
+/// stdio herdado (`run_wsl_inherited`): o apt desenha direto no console e o
+/// transcript guarda so nossas linhas (contrato do Reporter).
 pub fn apt_update_command(password_quote: &str) -> String {
     format!(
-        "printf '%s\\n' '{password_quote}' | sudo -S {APT_ENV_PREFIX} apt-get update 2>&1 | tail -n 1"
+        "printf '%s\\n' '{password_quote}' | sudo -S {APT_ENV_PREFIX} apt-get update 2>&1"
     )
 }
 
 /// `apt-get install -y <pkg> gnome-remote-desktop openssl python3-pil curl`.
 pub fn apt_install_command(gui_package: &str, password_quote: &str) -> String {
     format!(
-        "printf '%s\\n' '{password_quote}' | sudo -S {APT_ENV_PREFIX} apt-get install -y {gui_package} gnome-remote-desktop openssl python3-pil curl 2>&1 | tail -n 2"
+        "printf '%s\\n' '{password_quote}' | sudo -S {APT_ENV_PREFIX} apt-get install -y {gui_package} gnome-remote-desktop openssl python3-pil curl 2>&1"
     )
 }
 
@@ -788,32 +792,40 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         &gui_installed_check_command(&gui_package),
     )?;
     if r.out.contains("MISSING") {
-        rep.say("  apt update + instalacao (~2 GB, demora)...");
+        rep.say("  apt update + instalacao (~2 GB, demora; barra ao vivo abaixo)...");
         let mut ok = false;
         for i in 1..=d.apt_retries {
             if ok {
                 break;
             }
-            let _ = wsl_cmd::invoke_wsl(Some(&distro), &linux_user, &apt_update_command(&pwq))?;
-            let _ = wsl_cmd::invoke_wsl(
+            // Stdio herdado: a barra do apt desenha no console (capturar com
+            // `tail` esconderia o progresso); o gate real e o dpkg abaixo.
+            let up = wsl_cmd::run_wsl_inherited(
+                Some(&distro),
+                &linux_user,
+                &apt_update_command(&pwq),
+            )?;
+            let inst = wsl_cmd::run_wsl_inherited(
                 Some(&distro),
                 &linux_user,
                 &apt_install_command(&gui_package, &pwq),
             )?;
-            ok = wsl_cmd::invoke_wsl(
-                Some(&distro),
-                &linux_user,
-                &format!("dpkg -l {gui_package} 2>/dev/null | grep -q '^ii'"),
-            )?
-            .code
-                == 0;
+            ok = up == 0
+                && inst == 0
+                && wsl_cmd::invoke_wsl(
+                    Some(&distro),
+                    &linux_user,
+                    &format!("dpkg -l {gui_package} 2>/dev/null | grep -q '^ii'"),
+                )?
+                .code
+                    == 0;
             if !ok {
                 rep.warn(&format!("Tentativa {i} falhou, tentando de novo..."));
             }
         }
         if !ok {
             rep.fail(format!(
-                "APT nao concluiu apos {} tentativas - veja o log",
+                "APT nao concluiu apos {} tentativas - confira a saida do apt acima",
                 d.apt_retries
             ));
             return Err(InstallError::AptFailed);
@@ -1437,6 +1449,13 @@ mod tests {
         ));
         assert!(apt_install_command("ubuntu-desktop-minimal", "pw")
             .contains("gnome-remote-desktop openssl python3-pil curl"));
+    }
+
+    #[test]
+    fn apt_commands_have_no_tail_for_live_bar() {
+        // Com `tail`, ~2 GB passam no escuro: a barra nativa exige stream.
+        assert!(!apt_update_command("pw").contains("tail"));
+        assert!(!apt_install_command("u", "pw").contains("tail"));
     }
 
     #[test]

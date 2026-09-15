@@ -93,6 +93,39 @@ pub fn invoke_wsl(
     Err(InstallError::NotSupportedOnLinux("Invoke-Wsl (wsl.exe)"))
 }
 
+/// Roda `wsl ...` com stdio HERDADO (a saida desenha direto no console):
+/// para passos longos com barra nativa (`apt`, ~2 GB). Devolve so o exit
+/// code (o gate real fica com a verificacao seguinte, ex. `dpkg -l`).
+/// Sem captura, sem `tail`: capturar esconderia o progresso.
+#[cfg(windows)]
+pub fn run_wsl_inherited(
+    distro: Option<&str>,
+    as_user: &str,
+    command: &str,
+) -> Result<i32, InstallError> {
+    use std::process::Command;
+
+    let target = resolve_distro(distro);
+    let argv = build_wsl_argv(target, as_user, command);
+    let status = Command::new("wsl")
+        .args(&argv[1..])
+        .status()
+        .map_err(InstallError::from)?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Fora do Windows nao ha `wsl.exe`: erro tipado em vez de falhar mudo.
+#[cfg(not(windows))]
+pub fn run_wsl_inherited(
+    _distro: Option<&str>,
+    _as_user: &str,
+    _command: &str,
+) -> Result<i32, InstallError> {
+    Err(InstallError::NotSupportedOnLinux(
+        "run_wsl_inherited (wsl.exe)",
+    ))
+}
+
 /// `Invoke-WslRoot`: `Invoke-Wsl "root" ...`.
 pub fn invoke_wsl_root(distro: Option<&str>, command: &str) -> Result<WslResult, InstallError> {
     invoke_wsl(distro, "root", command)
@@ -153,6 +186,13 @@ mod tests {
     #[test]
     fn linux_stub_is_typed_error() {
         let e = invoke_wsl(None, "root", "true").unwrap_err();
+        assert!(matches!(e, InstallError::NotSupportedOnLinux(_)));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn inherited_stub_is_typed_error() {
+        let e = run_wsl_inherited(None, "root", "true").unwrap_err();
         assert!(matches!(e, InstallError::NotSupportedOnLinux(_)));
     }
 }
