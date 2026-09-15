@@ -8,7 +8,9 @@ function New-LauncherContent(
   [string]$DiscoveryBlock,
   [string]$RewriteBlock,
   [string]$FreeRdpBin = '',
-  [string]$WRdpPath = ''
+  [string]$WRdpPath = '',
+  [int]$RdpWidth,
+  [int]$RdpHeight
 ) {
   $cmd = @'
 @echo off
@@ -37,7 +39,7 @@ rem Sem arquivo no caminho diario: credencial no Cofre do Windows (sem aviso de
 rem fornecedor). Se falhar, volta ao .rdp (comportamento anterior, nunca pior).
 if not exist "%MSTSC%" goto :FREERDP
 powershell -NoProfile -ExecutionPolicy Bypass -File "%CREDHELPER%" "%RDPPATH%" "%WSL_IP%" RDP_PORT_VAL >nul 2>&1
-if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL)
+if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL /w:RDP_W_VAL /h:RDP_H_VAL)
 goto :ENDLAUNCH
 :FREERDP
 %WSL% -d %DISTRO% -u LINUXUSER_VAL -- FREERDP_VAL "W_RDP_VAL"
@@ -49,5 +51,6 @@ goto :ENDLAUNCH
     -replace "SHELLSVC_VAL", $script:UbuntuGuiDefaults.ShellService `
     -replace "RDPSVC_VAL", $script:UbuntuGuiDefaults.RdpService `
     -replace "IPDISCOVERY_VAL", $DiscoveryBlock `
-    -replace "FREERDP_VAL", $FreeRdpBin -replace "W_RDP_VAL", $WRdpPath)
+    -replace "FREERDP_VAL", $FreeRdpBin -replace "W_RDP_VAL", $WRdpPath `
+    -replace "RDP_W_VAL", $RdpWidth -replace "RDP_H_VAL", $RdpHeight)
 }

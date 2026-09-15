@@ -634,10 +634,12 @@ $discBlock = if ($LocalhostLive) { 'rem IP fixo via mirrored networking (127.0.0
 # Fixo: nao reescreve o .rdp (assinatura continua valida). Dinamico: reescreve + reassina SO se o IP mudou (sem churn: o "nao perguntar de novo" do mstsc sobrevive entre cliques).
 $rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - .rdp assinado, nao alterar' }
   else { 'for /f "tokens=3,4 delims=:" %%a in (''findstr /B "full address:s:" ''%RDPPATH%'' '') do set RDP_CUR=%%a:%%b' + "`r`n" + 'if not "%RDP_CUR%"=="%WSL_IP%:RDP_PORT_VAL" powershell -NoProfile -Command "(Get-Content ''%RDPPATH%'') -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1"' }
+$rdpW = 1600; $rdpH = 900
+if ($RES -match '^(\d+)x(\d+)$') { $rdpW = [int]$Matches[1]; $rdpH = [int]$Matches[2] }
 $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
   -LinuxUser $LinuxUser -RdpPort $RDP_PORT -Thumbprint $pubCert.Thumbprint `
   -DiscoveryBlock $discBlock -RewriteBlock $rewriteBlock `
-  -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath
+  -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath -RdpWidth $rdpW -RdpHeight $rdpH
 [IO.File]::WriteAllText($CmdPath, $cmd)
 Ok "Script em $CmdPath"
 # Helper que grava a credencial no Cofre do Windows (login sem aviso de fornecedor).

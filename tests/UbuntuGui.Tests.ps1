@@ -79,9 +79,9 @@ Describe 'New-RdpFileContent' {
 
 Describe 'New-LauncherContent' {
   $c = & (Get-Module UbuntuGui) { New-LauncherContent -AppName 'Ubuntu-GUI' -Distro 'Ubuntu' -LinuxUser 'daniel' `
-    -RdpPort 3390 -Thumbprint 'ABC123' -DiscoveryBlock 'rem X' -RewriteBlock 'rem Y THUMBPRINT_VAL' }
+    -RdpPort 3390 -Thumbprint 'ABC123' -DiscoveryBlock 'rem X' -RewriteBlock 'rem Y THUMBPRINT_VAL' -RdpWidth 1600 -RdpHeight 900 }
   It 'troca todos os placeholders' {
-    $c | Should Not Match 'DISTRO_VAL|RDP_PORT_VAL|THUMBPRINT_VAL|IPDISCOVERY_VAL|RDPREWRITE_VAL|LINUXUSER_VAL|SHELLSVC_VAL|RDPSVC_VAL|FREERDP_VAL|W_RDP_VAL'
+    $c | Should Not Match 'DISTRO_VAL|RDP_PORT_VAL|THUMBPRINT_VAL|IPDISCOVERY_VAL|RDPREWRITE_VAL|LINUXUSER_VAL|SHELLSVC_VAL|RDPSVC_VAL|FREERDP_VAL|W_RDP_VAL|RDP_W_VAL|RDP_H_VAL'
   }
   It 'embute thumbprint e usuario' {
     $c | Should Match 'ABC123'
@@ -91,7 +91,7 @@ Describe 'New-LauncherContent' {
     $c | Should Match 'mstsc.exe nao encontrado'
   }
   $f = & (Get-Module UbuntuGui) { New-LauncherContent -AppName 'Ubuntu-GUI' -Distro 'Ubuntu' -LinuxUser 'daniel' `
-    -RdpPort 3390 -Thumbprint 'ABC123' -DiscoveryBlock 'rem X' -RewriteBlock 'rem Y' -FreeRdpBin '/usr/bin/xfreerdp' -WRdpPath '/mnt/c/Ubuntu-GUI.rdp' }
+    -RdpPort 3390 -Thumbprint 'ABC123' -DiscoveryBlock 'rem X' -RewriteBlock 'rem Y' -FreeRdpBin '/usr/bin/xfreerdp' -WRdpPath '/mnt/c/Ubuntu-GUI.rdp' -RdpWidth 1600 -RdpHeight 900 }
   It 'com reserva chama o cliente do WSL quando sem mstsc' {
     $f | Should Match '/usr/bin/xfreerdp'
     $f | Should Match '/mnt/c/Ubuntu-GUI.rdp'
@@ -102,6 +102,7 @@ Describe 'New-LauncherContent' {
   It 'tenta login sem aviso via cofre antes do rdp' {
     $c | Should Match 'CREDHELPER'
     $c | Should Match '/v:'
+    $c | Should Match '/w:1600'
   }
 }
 

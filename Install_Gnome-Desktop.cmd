@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "7eeac7c10e0e"
+$SCRIPT_BUILD = "80c01419496d"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -672,7 +672,9 @@ function New-LauncherContent(
   [string]$DiscoveryBlock,
   [string]$RewriteBlock,
   [string]$FreeRdpBin = '',
-  [string]$WRdpPath = ''
+  [string]$WRdpPath = '',
+  [int]$RdpWidth,
+  [int]$RdpHeight
 ) {
   $cmd = @'
 @echo off
@@ -701,7 +703,7 @@ rem Sem arquivo no caminho diario: credencial no Cofre do Windows (sem aviso de
 rem fornecedor). Se falhar, volta ao .rdp (comportamento anterior, nunca pior).
 if not exist "%MSTSC%" goto :FREERDP
 powershell -NoProfile -ExecutionPolicy Bypass -File "%CREDHELPER%" "%RDPPATH%" "%WSL_IP%" RDP_PORT_VAL >nul 2>&1
-if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL)
+if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL /w:RDP_W_VAL /h:RDP_H_VAL)
 goto :ENDLAUNCH
 :FREERDP
 %WSL% -d %DISTRO% -u LINUXUSER_VAL -- FREERDP_VAL "W_RDP_VAL"
@@ -713,7 +715,8 @@ goto :ENDLAUNCH
     -replace "SHELLSVC_VAL", $script:UbuntuGuiDefaults.ShellService `
     -replace "RDPSVC_VAL", $script:UbuntuGuiDefaults.RdpService `
     -replace "IPDISCOVERY_VAL", $DiscoveryBlock `
-    -replace "FREERDP_VAL", $FreeRdpBin -replace "W_RDP_VAL", $WRdpPath)
+    -replace "FREERDP_VAL", $FreeRdpBin -replace "W_RDP_VAL", $WRdpPath `
+    -replace "RDP_W_VAL", $RdpWidth -replace "RDP_H_VAL", $RdpHeight)
 }
 # Gera o helper que grava a credencial RDP no Cofre do Windows (Credential Manager)
 # para o mstsc abrir sem o aviso de fornecedor (sem precisar do .rdp assinado).
@@ -1421,10 +1424,12 @@ $discBlock = if ($LocalhostLive) { 'rem IP fixo via mirrored networking (127.0.0
 # Fixo: nao reescreve o .rdp (assinatura continua valida). Dinamico: reescreve + reassina SO se o IP mudou (sem churn: o "nao perguntar de novo" do mstsc sobrevive entre cliques).
 $rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - .rdp assinado, nao alterar' }
   else { 'for /f "tokens=3,4 delims=:" %%a in (''findstr /B "full address:s:" ''%RDPPATH%'' '') do set RDP_CUR=%%a:%%b' + "`r`n" + 'if not "%RDP_CUR%"=="%WSL_IP%:RDP_PORT_VAL" powershell -NoProfile -Command "(Get-Content ''%RDPPATH%'') -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1"' }
+$rdpW = 1600; $rdpH = 900
+if ($RES -match '^(\d+)x(\d+)$') { $rdpW = [int]$Matches[1]; $rdpH = [int]$Matches[2] }
 $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
   -LinuxUser $LinuxUser -RdpPort $RDP_PORT -Thumbprint $pubCert.Thumbprint `
   -DiscoveryBlock $discBlock -RewriteBlock $rewriteBlock `
-  -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath
+  -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath -RdpWidth $rdpW -RdpHeight $rdpH
 [IO.File]::WriteAllText($CmdPath, $cmd)
 Ok "Script em $CmdPath"
 # Helper que grava a credencial no Cofre do Windows (login sem aviso de fornecedor).
