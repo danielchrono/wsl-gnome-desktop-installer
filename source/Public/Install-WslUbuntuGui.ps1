@@ -16,7 +16,7 @@ function Install-WslUbuntuGui {
   3. Desabilita o GDM, configura o ambiente WSLg no .bashrc
   4. Le a resolucao do monitor Windows e cria o monitor virtual igual
   5. Sobe o GNOME headless + RDP com TLS e credencial no cofre
-  6. Baixa o icone oficial do Ubuntu, cria o .cmd e os atalhos
+  6. Baixa o icone oficial do Ubuntu, restaura o mstsc se ausente, cria o .cmd e os atalhos
 #>
 [CmdletBinding()]
 param(
@@ -525,6 +525,31 @@ try {
 
 # ============================== 6. ICONE + ATALHOS ==============================
 Step "6/7 Icone e atalhos ($APP_NAME)"
+# Cliente RDP desinstalavel desde 23H2 (doc MS): se sumiu, reinstala pelo
+# instalador oficial (silencioso). Nunca fatal: sem mstsc o resto instala
+# igual, so o atalho nao abre (espelha a checagem do launcher).
+$mstscSys = "$env:SystemRoot\System32"
+if ((-not [Environment]::Is64BitProcess) -and (Test-Path "$env:SystemRoot\Sysnative\mstsc.exe")) { $mstscSys = "$env:SystemRoot\Sysnative" }
+$mstscExe = Join-Path $mstscSys "mstsc.exe"
+if (-not (Test-Path $mstscExe)) {
+  $procArch = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE")
+  if ([string]::IsNullOrEmpty($procArch)) { $procArch = "AMD64" }
+  $mstscUrl = if ($procArch -eq "ARM64") { $D.MstscSetupUrlArm64 } elseif ($procArch -eq "x86") { $D.MstscSetupUrl32 } else { $D.MstscSetupUrl64 }
+  $isAdmin = $false
+  try { $isAdmin = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $isAdmin = $false }
+  if (-not $isAdmin) {
+    Warn "mstsc.exe ausente - rode como admin p/ reinstalar sozinho (ou instale: $mstscUrl)"
+  } else {
+    $mstscSetup = Join-Path $env:TEMP "mstsc-setup.exe"
+    Write-Host "  Baixando o cliente RDP oficial (mstsc)..." -ForegroundColor Yellow
+    try {
+      (New-Object Net.WebClient).DownloadFile($mstscUrl, $mstscSetup)
+      Start-Process -FilePath $mstscSetup -Wait
+      if (Test-Path $mstscExe) { Ok "Cliente RDP (mstsc) restaurado"; Remove-Item $mstscSetup -Force -ErrorAction SilentlyContinue }
+      else { Warn "Instalador do mstsc rodou mas o exe segue ausente ($mstscSetup guardado)" }
+    } catch { Warn "mstsc nao restaurado ($($_.Exception.Message)) - instale manual: $mstscUrl" }
+  }
+}
 foreach ($d in @($IconsDir, $ProgDir)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
