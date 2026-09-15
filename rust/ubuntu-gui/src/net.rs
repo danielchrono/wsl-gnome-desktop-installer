@@ -88,6 +88,7 @@ mod tests {
         assert!(!is_port_in_use("127.0.0.1", port, 500));
     }
 
+    #[cfg(windows)]
     #[test]
     fn occupied_port_is_detected() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

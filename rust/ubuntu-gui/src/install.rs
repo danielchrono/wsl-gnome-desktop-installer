@@ -288,11 +288,12 @@ pub fn check_output_matches(out: &str, want: &str) -> bool {
 /// Extrai o build do Windows da saida de `cmd /c ver`
 /// (`Microsoft Windows [Version 10.0.22621.1]` -> `22621`).
 pub fn parse_windows_build(ver_output: &str) -> Option<u32> {
-    let v = ver_output.split("Version").nth(1)?;
-    let mut parts = v.split('.');
-    parts.next()?;
-    parts.next()?;
-    parts
+    // Ancora no prefixo NT (`10.0.`), igual em qualquer idioma: o rotulo
+    // antes dele muda (`Version` em EN, `versão` em PT-BR) e quebrava o
+    // parse em Windows em portugues (build real 26200 lia como 0).
+    let after = ver_output.split("10.0.").nth(1)?;
+    after
+        .split('.')
         .next()?
         .chars()
         .take_while(|c| c.is_ascii_digit())
@@ -1215,12 +1216,8 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     } else {
         r"C:\Windows\System32\mstsc.exe,0".to_string()
     };
-    let desktop = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
-        .join("Desktop")
-        .join(format!("{app_name}.lnk"));
-    let start = PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
-        .join(r"Microsoft\Windows\Start Menu\Programs")
-        .join(format!("{app_name}.lnk"));
+    let desktop = desktop_dir().join(format!("{app_name}.lnk"));
+    let start = programs_menu_dir().join(format!("{app_name}.lnk"));
     let mut links_ok = true;
     for lnk in [&desktop, &start] {
         if let Err(e) = write_shortcut(&cmd_path, &prog_dir, &ico_spec, lnk) {
@@ -1361,6 +1358,70 @@ fn wsl_write_stdin(
     }
     let _ = child.wait()?;
     Ok(())
+}
+
+/// Pasta Desktop real: Known Folder no Windows (respeita o redirecionamento
+/// do OneDrive, como `GetFolderPath("Desktop")` do PS); fallback
+/// `USERPROFILE\Desktop` (o `USERPROFILE\Desktop` fixo escrevia o `.lnk`
+/// fora do Desktop visivel com backup do OneDrive ativo).
+pub fn desktop_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::FOLDERID_DESKTOP;
+        if let Some(p) = known_folder_path(&FOLDERID_DESKTOP as *const _) {
+            return p;
+        }
+    }
+    desktop_under(&std::env::var("USERPROFILE").unwrap_or_default())
+}
+
+/// Pasta Iniciar/Programas real (mesma regra do Desktop).
+pub fn programs_menu_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::FOLDERID_PROGRAMS;
+        if let Some(p) = known_folder_path(&FOLDERID_PROGRAMS as *const _) {
+            return p;
+        }
+    }
+    programs_under(&std::env::var("APPDATA").unwrap_or_default())
+}
+
+/// Join puro do fallback do Desktop (testavel sem Windows).
+pub fn desktop_under(userprofile: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(userprofile).join("Desktop")
+}
+
+/// Join puro do fallback do Iniciar/Programas (testavel sem Windows).
+pub fn programs_under(appdata: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs")
+}
+
+/// `SHGetKnownFolderPath` (`FOLDERID_Desktop`/`FOLDERID_Programs`): `None`
+/// quando a API falha (o chamador cai no fallback acima, nunca quebra).
+#[cfg(windows)]
+fn known_folder_path(id: *const windows::core::GUID) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+    // SAFETY: ponteiro do CoTaskMem lido ate o NUL e liberado em seguida.
+    unsafe {
+        let pw = SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let ptr = pw.0;
+        if ptr.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+        CoTaskMemFree(Some(ptr as *const core::ffi::c_void));
+        if s.trim().is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(s))
+        }
+    }
 }
 
 /// Atalho `.lnk` via mslnk (puro, testavel no Linux); placement no Desktop +
@@ -1564,6 +1625,7 @@ mod tests {
         assert!(check_unattended_credentials(Some("   "), Some("s3nha")).is_err());
     }
 
+    #[cfg(windows)]
     #[test]
     fn tcp_probe_sees_live_listener() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1614,10 +1676,28 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_folders_fallback_joins() {
+        // Fallback sem Known Folder (o fix e a origem da base no Windows;
+        // o rerun la confirma o OneDrive). Por componentes: o separador
+        // varia por SO e o join e testado pela estrutura, nao pela string.
+        let d = desktop_under(r"C:\Users\danie");
+        assert_eq!(d.file_name().unwrap(), "Desktop");
+        assert!(d.to_string_lossy().starts_with(r"C:\Users\danie"));
+        let p = programs_under(r"C:\Users\danie\AppData\Roaming");
+        assert!(p.to_string_lossy().ends_with("Programs"));
+        assert!(p.to_string_lossy().contains("Start Menu"));
+    }
+
+    #[test]
     fn ver_build_parser() {
         assert_eq!(
             parse_windows_build("Microsoft Windows [Version 10.0.22621.1]"),
             Some(22621)
+        );
+        // Windows em PT-BR: `ver` imprime `versão`, nao `Version`.
+        assert_eq!(
+            parse_windows_build("Microsoft Windows [versão 10.0.26200.9457]"),
+            Some(26200)
         );
         assert_eq!(parse_windows_build("sem versao"), None);
     }

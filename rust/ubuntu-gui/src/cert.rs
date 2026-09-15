@@ -1,10 +1,13 @@
 //! Certificado de publicador (`New-PublisherCertificate.ps1`): assinar o
 //! `.rdp` para sumir o aviso "fornecedor desconhecido".
 //!
-//! Idempotente: reaproveita se ja existir no `CurrentUser\My` (filtrado por
-//! EKU CodeSigning + `Subject -eq`, espelhado em [`find_existing_subject`]).
-//! Senao gera autoassinado (rcgen, testavel no Linux) com validade de
-//! `CertYears` e grava em `My` + `TrustedPublishers` (`cfg(windows)`).
+//! Idempotente via script find-or-create ([`publisher_cert_script`]) que usa
+//! a mesma primitiva do PS (`New-SelfSignedCertificate`, reaproveita de
+//! `CurrentUser\My` por `Subject -eq`, grava em `My` + `TrustedPublishers`)
+//! e devolve o thumbprint pelo marcador ([`parse_thumbprint_output`]).
+//! O `generate_self_signed` (rcgen) fica como item testavel no Linux da
+//! matriz; nao e usado no Windows (rcgen gera ECDSA sem chave persistida,
+//! inutil para o `rdpsign`).
 
 use crate::error::InstallError;
 
@@ -71,134 +74,91 @@ pub fn generate_self_signed(subject: &str, years: u32) -> Result<GeneratedCert, 
 /// Garante o certificado de publicador (Windows): reaproveita de `My` por
 /// Subject ou gera + grava em `My` e `TrustedPublishers`. Retorna o
 /// thumbprint (SHA-1 hex maiusculo, como `$pubCert.Thumbprint`).
+///
+/// Delega a criacao ao `New-SelfSignedCertificate` (a mesma primitiva do
+/// `New-PublisherCertificate.ps1`): so ele cria RSA-2048 **com a chave
+/// privada persistida no store** — sem ela o `rdpsign` recusa o cert com
+/// `0x8009200B`. O caminho anterior (rcgen gera ECDSA, e o add via DER nao
+/// persiste chave) produzia um cert inutil para assinatura.
 #[cfg(windows)]
 pub fn ensure_publisher_certificate(subject: &str, years: u32) -> Result<String, InstallError> {
-    if let Some(tp) = find_in_my_store(subject)? {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW = 0x08000000: sem flash de console (como `wsl_cmd`).
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = publisher_cert_script(subject, years);
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script.as_str(),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(InstallError::from)?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Some(tp) = parse_thumbprint_output(&stdout) {
         return Ok(tp);
     }
-    let gen = generate_self_signed(subject, years)?;
-    add_der_to_store("MY", &gen.cert_der)?;
-    add_der_to_store("TrustedPublishers", &gen.cert_der)?;
-    // Rele o thumbprint do que foi gravado (fonte: o store, como no PS).
-    find_in_my_store(subject)?.ok_or_else(|| {
-        InstallError::CertFailed("certificado gerado mas nao encontrado no store My".to_string())
-    })
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut tail: Vec<String> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if tail.len() > 3 {
+        tail = tail[tail.len() - 3..].to_vec();
+    }
+    if tail.is_empty() {
+        tail.push("(sem saida)".to_string());
+    }
+    Err(InstallError::CertFailed(format!(
+        "publicador nao garantido ({})",
+        tail.join(" | ")
+    )))
 }
 
-#[cfg(windows)]
-fn store_name_wide(name: &str) -> Vec<u16> {
-    name.encode_utf16().chain(std::iter::once(0)).collect()
+/// Script find-or-create do publicador (mesma primitiva do PS legado, numa
+/// unica chamada): reaproveita de `My` por Subject exato **com chave
+/// privada** ou cria CodeSigning autoassinado em `My` + `TrustedPublishers`.
+/// O `HasPrivateKey` descarta o cert sem chave que o caminho antigo (DER
+/// sem chave) deixou no store — sem ele o `rdpsign` seguiria falhando.
+/// Imprime `UBUNTUGUI_THUMBPRINT=<40 hex>`; sem CRLF (vai no argv).
+pub fn publisher_cert_script(subject: &str, years: u32) -> String {
+    format!(
+        "$c = Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -eq '{subject}' -and $_.HasPrivateKey }} | Select-Object -First 1; if (-not $c) {{ $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddYears({years}); $s = New-Object Security.Cryptography.X509Certificates.X509Store('TrustedPublishers','CurrentUser'); $s.Open('ReadWrite'); $s.Add($c); $s.Close() }}; 'UBUNTUGUI_THUMBPRINT=' + $c.Thumbprint"
+    )
 }
 
-/// Procura em `CurrentUser\My` por Subject exato; devolve o thumbprint.
-#[cfg(windows)]
-fn find_in_my_store(subject: &str) -> Result<Option<String>, InstallError> {
-    
-    use windows::Win32::Security::Cryptography::{
-        CertCloseStore, CertFindCertificateInStore, CertGetNameStringW, CertOpenStore,
-        CERT_FIND_SUBJECT_STR_W, CERT_OPEN_STORE_FLAGS,
-        CERT_QUERY_ENCODING_TYPE, CERT_STORE_PROV_SYSTEM_W, X509_ASN_ENCODING,
-    };
-
-    let store_param = store_name_wide("MY");
-    // SAFETY: ponteiros validos durante a chamada; store fechado no fim.
-    unsafe {
-        let store = CertOpenStore(
-            CERT_STORE_PROV_SYSTEM_W,
-            CERT_QUERY_ENCODING_TYPE(0),
-            None,
-            CERT_OPEN_STORE_FLAGS(0x0001_0000), // CERT_SYSTEM_STORE_CURRENT_USER
-            Some(store_param.as_ptr() as *const _),
-        )
-        .map_err(|e| InstallError::Io(format!("CertOpenStore My: {e}")))?;
-        let want = store_name_wide(subject);
-        let mut found: Option<String> = None;
-        // v0.61: CertFindCertificateInStore exige Option<*const CERT_CONTEXT> para prev.
-        let mut prev: Option<*const windows::Win32::Security::Cryptography::CERT_CONTEXT> = None;
-        loop {
-            let ctx = CertFindCertificateInStore(
-                store,
-                X509_ASN_ENCODING,
-                0,
-                CERT_FIND_SUBJECT_STR_W,
-                Some(want.as_ptr() as *const _),
-                prev,
-            );
-            if ctx.is_null() {
-                break;
-            }
-            prev = Some(ctx);
-            // Subject exato (o FIND ja filtra por substring; confirma eq).
-            let mut buf = [0u16; 512];
-            let len = CertGetNameStringW(
-                ctx,
-                // v0.61: CERT_NAME_SIMPLE_DISPLAY_TYPE e um u32 direto (sem .0).
-                windows::Win32::Security::Cryptography::CERT_NAME_SIMPLE_DISPLAY_TYPE,
-                0,
-                None,
-                Some(&mut buf),
-            );
-            let got = String::from_utf16_lossy(&buf[..len.saturating_sub(1) as usize]);
-            if got == subject || subject.contains(&got) || got.contains(subject) {
-                // Thumbprint = SHA-1 do DER (formato `$cert.Thumbprint`).
-                let raw = std::slice::from_raw_parts(
-                    (*ctx).pbCertEncoded as *const u8,
-                    (*ctx).cbCertEncoded as usize,
-                );
-                found = Some(sha1_hex_upper(raw));
-                break;
+/// Parser fail-closed do marcador (40 hex; `.NET Thumbprint` ja e
+/// maiusculo, normaliza de todo jeito).
+pub fn parse_thumbprint_output(out: &str) -> Option<String> {
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("UBUNTUGUI_THUMBPRINT=") {
+            let tp = rest.trim();
+            if tp.len() == 40 && tp.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(tp.to_ascii_uppercase());
             }
         }
-        // v0.61: CertCloseStore recebe Option<HCERTSTORE>.
-        let _ = CertCloseStore(Some(store), 0);
-        Ok(found)
     }
-}
-
-#[cfg(windows)]
-fn add_der_to_store(store_name: &str, der: &[u8]) -> Result<(), InstallError> {
-    use windows::Win32::Security::Cryptography::{
-        CertAddCertificateContextToStore, CertCloseStore, CertCreateCertificateContext,
-        CertOpenStore, CERT_OPEN_STORE_FLAGS, CERT_QUERY_ENCODING_TYPE,
-        CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_SYSTEM_W, X509_ASN_ENCODING,
-    };
-
-    let store_param = store_name_wide(store_name);
-    // SAFETY: ponteiros validos durante a chamada; contexto/store liberados.
-    unsafe {
-        let store = CertOpenStore(
-            CERT_STORE_PROV_SYSTEM_W,
-            CERT_QUERY_ENCODING_TYPE(0),
-            None,
-            CERT_OPEN_STORE_FLAGS(0x0001_0000),
-            Some(store_param.as_ptr() as *const _),
-        )
-        .map_err(|e| InstallError::Io(format!("CertOpenStore {store_name}: {e}")))?;
-        // v0.61: CertCreateCertificateContext recebe &[u8] (nao ptr+len).
-        let ctx = CertCreateCertificateContext(X509_ASN_ENCODING, der);
-        if ctx.is_null() {
-            let _ = CertCloseStore(Some(store), 0);
-            return Err(InstallError::CertFailed(
-                "CertCreateCertificateContext retornou NULL".to_string(),
-            ));
-        }
-        // v0.61: CertAddCertificateContextToStore e CertCloseStore recebem Option<HCERTSTORE>.
-        CertAddCertificateContextToStore(Some(store), ctx, CERT_STORE_ADD_REPLACE_EXISTING, None)
-            .map_err(|e| InstallError::CertFailed(format!("CertAdd {store_name}: {e}")))?;
-        let _ = CertCloseStore(Some(store), 0);
-        Ok(())
-    }
+    None
 }
 
 /// SHA-1 em hex maiusculo (formato do thumbprint .NET). Implementacao
-/// std-only para nao puxar crate so para isso.
-#[cfg(windows)]
+/// std-only para nao puxar crate so para isso. Spec executavel do formato
+/// (so usada em testes: o thumbprint de producao vem do store via
+/// `parse_thumbprint_output`).
+#[cfg(test)]
 fn sha1_hex_upper(data: &[u8]) -> String {
     let digest = sha1(data);
     digest.iter().map(|b| format!("{b:02X}")).collect()
 }
 
-#[cfg(windows)]
+#[cfg(test)]
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     let mut msg = data.to_vec();
@@ -289,6 +249,55 @@ mod tests {
         assert!(gen.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
         assert!(gen.key_pem.contains("PRIVATE KEY"));
         assert!(!gen.cert_der.is_empty());
+    }
+
+    #[test]
+    fn cert_script_carries_subject_years_and_marker() {
+        let s = publisher_cert_script("CN=Ubuntu-GUI RDP", 10);
+        assert!(s.contains("CN=Ubuntu-GUI RDP"));
+        assert!(s.contains("HasPrivateKey"));
+        assert!(s.contains("AddYears(10)"));
+        assert!(s.contains("New-SelfSignedCertificate -Type CodeSigningCert"));
+        assert!(s.contains("UBUNTUGUI_THUMBPRINT="));
+        assert!(!s.contains('\r'), "CRLF quebraria o argv do powershell");
+    }
+
+    #[test]
+    fn thumbprint_parser_accepts_marker_and_rejects_garbage() {
+        let good = "Publicador confiavel criado\nUBUNTUGUI_THUMBPRINT=A9993E364706816ABA3E25717850C26C9CD0D89D\n";
+        assert_eq!(
+            parse_thumbprint_output(good),
+            Some("A9993E364706816ABA3E25717850C26C9CD0D89D".to_string())
+        );
+        // Sem marcador, curto ou nao-hex: fail-closed.
+        assert_eq!(parse_thumbprint_output("ok sem marcador\n"), None);
+        assert_eq!(parse_thumbprint_output("UBUNTUGUI_THUMBPRINT=ABC123\n"), None);
+        assert_eq!(
+            parse_thumbprint_output(
+                "UBUNTUGUI_THUMBPRINT=ZZZZ3E364706816ABA3E25717850C26C9CD0D89D\n"
+            ),
+            None
+        );
+        assert_eq!(parse_thumbprint_output(""), None);
+    }
+
+    #[test]
+    fn sha1_matches_nist_vector() {
+        // SHA-1("abc") (FIPS 180-4; conferido contra `sha1sum` e hashlib).
+        assert_eq!(
+            sha1_hex_upper(b"abc"),
+            "A9993E364706816ABA3E25717850C26C9CD0D89D"
+        );
+    }
+
+    #[test]
+    fn generated_thumbprint_is_upper_hex_sha1_of_der() {
+        // Formato do `$cert.Thumbprint`: 40 hex maiusculos do SHA-1 do DER.
+        let gen = generate_self_signed("CN=Ubuntu-GUI RDP", 10).unwrap();
+        let tp = sha1_hex_upper(&gen.cert_der);
+        assert_eq!(tp.len(), 40);
+        assert!(tp.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(tp.bytes().all(|b| !b.is_ascii_lowercase()));
     }
 
     #[test]
