@@ -951,7 +951,11 @@ $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
 Write-Host "  Desbloqueando o cofre..." -ForegroundColor Yellow
 # Unlock + sonda na MESMA chamada (daemon pode ser efemero: ativado por D-Bus,
 # some em segundos; duas chamadas podem atingir instancias diferentes).
-$uk = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+# Se o PAM ja destravou (sudo -S true acima), pula o unlock: menos partes
+# moveis, e diagnostica se o caminho PAM funciona nesta maquina.
+$pamUnlocked = Test-WslKeyringUnlocked -LinuxUser $LinuxUser -Uid $Uid
+if ($pamUnlocked) { Ok "Cofre ja destravado via PAM (pulando unlock)" }
+$uk = if ($pamUnlocked) { @{ UnlockCode = 0; State = 'Unlocked'; Probe = 'via PAM'; UnlockText = '(via PAM)' } } else { UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid }
 if ($uk.UnlockCode -ne 0) {
   Fail "Cofre nao desbloqueou com a senha informada ($($uk.UnlockText)) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
   throw "Cofre bloqueado"
@@ -969,7 +973,7 @@ if ($uk.State -ne 'Unlocked') {
     throw "Cofre bloqueado"
   } else {
     $lockDetail = Get-WslKeyringLockDetail -LinuxUser $LinuxUser -Uid $Uid
-    Fail "Cofre segue trancado apos o unlock (unlock saiu $($uk2.UnlockCode); unlock disse: $($uk2.UnlockText); $lockDetail) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+    Fail "Cofre segue trancado apos o unlock (unlock saiu $($uk2.UnlockCode); unlock disse: $($uk2.UnlockText); $lockDetail) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo. Se a senha estiver CERTA: abra Senhas e chaves (seahorse), destrave 'login' uma vez, mantenha aberto e rode de novo"
     throw "Cofre bloqueado"
   }
 }

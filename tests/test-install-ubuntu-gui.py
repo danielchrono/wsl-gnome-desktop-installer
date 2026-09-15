@@ -111,5 +111,6 @@ check('re-sonda limitada (sem retry cego)', 'KeyringReprobeSec' in src and 'Star
 check('falha Locked traz detalhe (login/arquivos/daemons)', 'function Get-WslKeyringLockDetail' in src and 'collection/login' in src and 'pgrep -c gnome-keyring-daemon' in src)
 check('unlock+sonda mesma chamada (daemon efemero)', 'function UnlockAndProbe-WslKeyring' in src and 'function Read-UnlockProbeOutput' in src and 'UBUNTUGUI_UNLOCKCODE=' in src and 'UBUNTUGUI_PROBE=' in src)
 check('unlock/sonda via builders unicos', 'function Get-WslUnlockPipeline' in src and 'function Get-WslKeyringProbeCommand' in src and install_src.count('UnlockAndProbe-WslKeyring -LinuxUser') == 2 and 'Unlock-WslKeyring -LinuxUser' not in install_src)
+check('pula unlock se PAM destravou + guia seahorse', 'Cofre ja destravado via PAM (pulando unlock)' in src and 'seahorse' in src and '$pamUnlocked' in install_src)
 
 sys.exit(1 if fails else 0)
