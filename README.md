@@ -1,15 +1,23 @@
-# WSL Gnome-Desktop Installer — v0.1.0
+# WSL Gnome-Desktop Installer — v0.1.0 (Rust)
 
-Instalador em arquivo único: Ubuntu no WSL2 com desktop GNOME completo,
+Instalador em `.exe` único: Ubuntu no WSL2 com desktop GNOME completo,
 acessível via RDP (atalho no Desktop e no Iniciar, login automático).
+
+> A versão PowerShell (`Install_Gnome-Desktop.cmd`, `source/`, `tools/`)
+> foi canonizada na branch **`ps-legacy`**. A `main` é só Rust.
 
 ## Uso rápido
 
-1. Baixe `Install_Gnome-Desktop.cmd`, duplo clique (Windows 10 2004+ ou 11).
-2. Responda: usuário Linux, senha (2x) e modo de rede
-   (`[1]` localhost fixo `127.0.0.1` = padrão recomendado, `[2]` IP dinâmico).
-3. Se pedir reboot, o instalador **reabre sozinho** e termina (sem clicar de novo).
-4. Duplo clique no atalho **Ubuntu-GUI** e pronto.
+1. Compile: `cargo build --release` dentro de `rust/`
+   (no Linux p/ Windows: `cargo build --release --target x86_64-pc-windows-msvc`).
+2. Rode `ubuntu-gui.exe` (Windows 10 2004+ ou 11).
+3. Responda: usuário Linux, senha (2x) e modo de rede
+   (`localhost` fixo `127.0.0.1` = padrão recomendado, ou IP dinâmico).
+4. Se pedir reboot, o instalador **reabre sozinho** e termina (sem clicar de novo).
+5. Duplo clique no atalho **Ubuntu-GUI** e pronto.
+
+`ubuntu-gui.exe --help` lista as flags (`--linux-user`, `--linux-password`,
+`--resume <state.json>`, `--no-transcript`, ...).
 
 ## O que ele faz (7 etapas, idempotente)
 
@@ -18,56 +26,27 @@ acessível via RDP (atalho no Desktop e no Iniciar, login automático).
    e ativa o systemd.
 3. Instala `ubuntu-desktop-minimal` + GNOME Remote Desktop.
 4. Sobe o GNOME Shell headless na resolução do seu monitor.
-5. Configura RDP com TLS (porta **3390** — a 3389 é bloqueada no loopback
-   pelo Windows 11, erro `0x708`), credencial no cofre e controle total.
+5. Configura RDP com TLS (porta **3390** — a 3389 é a porta do RDP do host e
+   o loopback dela é instável entre máquinas; medido: trava sem listener),
+   credencial no cofre e controle total.
 6. Cria launcher `.cmd`, `.rdp` com login automático **assinado**
    (sem aviso de "fornecedor desconhecido") e atalhos com ícone do Ubuntu.
 7. Verificação ponta a ponta.
 
-## Arquivos
+## Cofre (conquistas espelhadas do legado)
 
-| Arquivo | Papel |
-|---|---|
-| `Install_Gnome-Desktop.cmd` | Entregável: extrai o PowerShell embutido e executa (**gerado — não editar**) |
-| `source/Public/` | `Install-WslUbuntuGui` (instalador, `-NoTui` p/ automação), `Get-WslUbuntuGuiStatus` (leitura) |
-| `source/Private/` | Helpers (RDP, launcher, cofre, WSL, feedback) + `UbuntuGui-Constants.ps1` (tunables) + `Test-InstallInput.ps1` (validação pura) + `Show-TuiMenu.ps1` (TUI setas+Enter, sem dependências) + `Invoke-VaultCredential.ps1` (gestor do cofre: prestart/unlock/sonda/gravar/verificar, com Locked vs Error) + `Test-WslServiceHealth.ps1` (sondas shell/RDP) + `Get-WslIpAddress.ps1` (IP do WSL) + `ConvertFrom-SecureStringPlain.ps1` (SecureString→texto) |
-| `source/UbuntuGui.psd1` | Manifesto do módulo (versão, exports) |
-| `tools/build_single.py` | Build: `python3 tools/build_single.py` regenera o `.cmd` |
-| `tests/test-install-ubuntu-gui.py` | Regressão: `python3 tests/test-install-ubuntu-gui.py` |
-| `tests/UbuntuGui.Tests.ps1` | Pester: `Invoke-Pester -Script tests/UbuntuGui.Tests.ps1` |
+- Sonda classifica `Unlocked` / `Locked` / `Missing` (coleção ausente)
+  / `Error` (bus fora) — sem confundir um com o outro;
+- Criação via `gnome-keyring-daemon --daemonize --login` (sem `sudo`,
+  sem `pam.d`, já sai destravado);
+- Recriação com backup timestampado + restore automático se falhar
+  (nunca `rm` no `login.keyring`);
+- Unlock+sonda na mesma chamada WSL; fail-fast sem retry cego.
 
-## Uso como módulo (comunidade)
+## Desenvolver
 
-```powershell
-Import-Module ./source/UbuntuGui.psd1
-Install-WslUbuntuGui                        # interativo (TUI com fallback texto)
-Install-WslUbuntuGui -NoTui                 # sem TUI (automação)
-Get-WslUbuntuGuiStatus -LinuxUser daniel | Format-List   # somente leitura
+```sh
+cd rust
+cargo test      # suite (inclui goldens em ubuntu-gui/tests/)
+cargo build --release
 ```
-
-Organização: Model (`UbuntuGui-Constants.ps1`, via `Get-UbuntuGuiDefaults`),
-View (`Write-Feedback.ps1`, `Show-TuiMenu.ps1` — só render/input),
-ViewModel (`Test-InstallInput.ps1` puro + `Install-WslUbuntuGui` orquestrando).
-
-Artefatos: `output/UbuntuGui/` (gerado, formato PSGallery — publicar com
-`Publish-Module` quando houver API key). Para contribuir: edite `source/`,
-rode o build + as duas suites; nunca edite o `.cmd` à mão.
-
-## Segurança
-
-- Senhas pedidas via `SecureString`; nunca gravadas em texto claro
-  (DPAPI no `.rdp`/retomada, cofre `login` no Linux).
-- TLS e assinatura `.rdp` usam certificados autoassinados locais.
-- RDP escuta em todas as interfaces: prefira senha forte em rede compartilhada.
-
-## Problemas conhecidos
-
-| Erro | Causa | Correção |
-|---|---|---|
-| `0x708` sessão de console | RDP via `127.0.0.1:3389` bloqueado | v0.1.0 usa a porta 3390 |
-| `0x904` não conecta | Credencial RDP vazia no daemon | instalador verifica de verdade (`grdctl status`) |
-| Aviso "fornecedor desconhecido" | `.rdp` sem assinatura | instalador assina (cert próprio confiável) |
-
-## Licença
-
-MIT — veja `LICENSE`.
