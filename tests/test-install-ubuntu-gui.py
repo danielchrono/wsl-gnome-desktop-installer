@@ -85,6 +85,9 @@ check('apt com backoff entre tentativas', 'AptRetrySec' in src and 'antes da ten
 check('apt com barra ao vivo (stdio herdado)', 'barra ao vivo abaixo' in src and '--exec bash -c "printf' in src)
 check('icone: curl com retry e erro visivel', '--retry-all-errors' in src and '--show-error' in src)
 check('rdpsign ausente nao mata (avisa e segue)', 'Sysnative' in src and 'pulando assinatura' in src)
+check('icone: python via base64 sem aspas aninhadas', 'base64 -d > /tmp/mkico.py' in src and 'python3 /tmp/mkico.py' in src and 'python3 -c' not in src)
+check('launcher resolve System32 via Sysnative', 'set SYS32=' in src and 'set MSTSC=%SYS32%' in src and 'not exist "%MSTSC%"' in src)
+check('senha com retry (nao mata o run)', 'PasswordMaxAttempts' in src and 'tente de novo' in src and 'Test-PasswordConfirmation' in src)
 check('limpa retomada no sucesso', 'Clear-ResumeState' in src)
 check('versao 0.1.0', 'SCRIPT_VERSION' in src and '"0.1.0"' in src)
 tracked = []

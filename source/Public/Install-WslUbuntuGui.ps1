@@ -59,6 +59,7 @@ $CredTimeoutSec  = $D.CredTimeoutSec
 $CredRetries     = $D.CredRetries
 $KeyringReprobeSec = $D.KeyringReprobeSec
 $AptRetries      = $D.AptRetries
+$PasswordMaxAttempts = $D.PasswordMaxAttempts
 $AptRetrySec     = $D.AptRetrySec
 $NetWaitTries    = $D.NetWaitTries
 $NetWaitSec      = $D.NetWaitSec
@@ -172,12 +173,17 @@ if (-not $Resume) {
   if ($LinuxPassword) {
     $LinuxPass = ConvertFrom-SecureStringPlain $LinuxPassword
   } else {
-    $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
-    $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
-    $LinuxPass = ConvertFrom-SecureStringPlain $sec1
-    $LinuxPass2 = ConvertFrom-SecureStringPlain $sec2
-    if ($LinuxPass -cne $LinuxPass2 -or [string]::IsNullOrEmpty($LinuxPass)) {
-      Fail "Senhas diferentes ou vazias - rode de novo"; throw "Senhas diferentes ou vazias"
+    # Retry: errar a confirmacao nao mata o run (fail-fast so apos N).
+    $LinuxPass = ''
+    for ($pa = 1; $pa -le $PasswordMaxAttempts; $pa++) {
+      $sec1 = Read-TuiSecurePassword -Prompt "Senha do usuario $LinuxUser" -NoTui:$NoTui
+      $sec2 = Read-TuiSecurePassword -Prompt "Confirme a senha" -NoTui:$NoTui
+      $cand = ConvertFrom-SecureStringPlain $sec1
+      if (Test-PasswordConfirmation -First $cand -Second (ConvertFrom-SecureStringPlain $sec2)) { $LinuxPass = $cand; break }
+      if ($pa -lt $PasswordMaxAttempts) { Warn "Senhas diferentes ou vazias - tente de novo ($pa/$PasswordMaxAttempts)" }
+    }
+    if ([string]::IsNullOrEmpty($LinuxPass)) {
+      Fail "Senhas diferentes ou vazias apos $PasswordMaxAttempts tentativas - rode de novo"; throw "Senhas diferentes ou vazias"
     }
   }
   # $PWQ = senha pronta para embutir em 'bash -c "..."' (escapa bash + PowerShell)
@@ -512,8 +518,21 @@ foreach ($d in @($IconsDir, $ProgDir)) {
 if (-not (Test-Path $IcoPath)) {
   # C:\... -> /mnt/c/... (sintaxe compativel com Windows PowerShell 5.1)
   $wIco = '/mnt/' + $IcoPath.Substring(0, 1).ToLower() + ($IcoPath.Substring(2) -replace '\\', '/')
-  $iconSizesArg = ($IconSizes | ForEach-Object { "($_ ,$_)" }) -join ','
-  $r = Invoke-Wsl $LinuxUser "curl -sSL --retry 2 --retry-delay 5 --retry-all-errors --show-error --max-time 60 -o /tmp/cof.png '$ICON_URL' && python3 -c `"from PIL import Image; im=Image.open('/tmp/cof.png').convert('RGBA'); S=max(im.size); sq=Image.new('RGBA',(S,S),(0,0,0,0)); sq.paste(im,((S-im.width)//2,(S-im.height)//2),im); sq.save('$wIco',sizes=[$iconSizesArg])`"" 2>&1
+  $iconSizesArg = ($IconSizes | ForEach-Object { "($_, $_)" }) -join ', '
+  # Script python via base64: aspas duplas aninhadas NAO atravessam o argv do
+  # wsl.exe (o -c com aspas chegava fatiado e o python via so 'from').
+  # Sem aspas duplas no comando: so singles, que passam intactas.
+  $pyTemplate = @'
+from PIL import Image
+import sys
+im = Image.open('/tmp/cof.png').convert('RGBA')
+S = max(im.size)
+sq = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+sq.paste(im, ((S - im.width) // 2, (S - im.height) // 2), im)
+sq.save(sys.argv[1], sizes=[SIZES_ARG])
+'@
+  $pyB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($pyTemplate -replace 'SIZES_ARG', $iconSizesArg)))
+  $r = Invoke-Wsl $LinuxUser "curl -sSL --retry 2 --retry-delay 5 --retry-all-errors --show-error --max-time 60 -o /tmp/cof.png '$ICON_URL' && echo '$pyB64' | base64 -d > /tmp/mkico.py && python3 /tmp/mkico.py '$wIco'"
   if (Test-Path $IcoPath) { Ok "Icone Ubuntu baixado e convertido" }
   else { Warn "Icone oficial falhou, usando o do mstsc ($($r.Out))" }
 } else { Ok "Icone ja existia" }
@@ -536,7 +555,7 @@ $discBlock = if ($LocalhostLive) { 'rem IP fixo via mirrored networking (127.0.0
   else { 'rem IP descoberto automaticamente a cada clique (hostname -I)' + "`r`n" + 'for /f "tokens=1" %%i in (''%WSL% -d %DISTRO% -- hostname -I 2^>nul'') do set WSL_IP=%%i' }
 # Fixo: nao reescreve o .rdp (assinatura continua valida). Dinamico: reescreve + reassina.
 $rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - .rdp assinado, nao alterar' }
-  else { 'powershell -NoProfile -Command "(Get-Content ''%RDPPATH%'') -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; & %SystemRoot%\System32\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1"' }
+  else { 'powershell -NoProfile -Command "(Get-Content ''%RDPPATH%'') -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1"' }
 $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
   -LinuxUser $LinuxUser -RdpPort $RDP_PORT -Thumbprint $pubCert.Thumbprint `
   -DiscoveryBlock $discBlock -RewriteBlock $rewriteBlock

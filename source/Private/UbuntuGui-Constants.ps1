@@ -13,6 +13,7 @@ $script:UbuntuGuiDefaults = @{
   CredRetries          = 2       # tentativas de gravacao no cofre
   KeyringReprobeSec    = 5       # espera antes da re-sonda (corrida de ativacao do D-Bus)
   AptRetries           = 3       # tentativas de apt install
+  PasswordMaxAttempts  = 3       # digitacao/confirmacao da senha (canon Rust)
   AptRetrySec          = 20      # espera entre tentativas de apt
   NetWaitTries         = 6       # sondas de DNS no WSL pos-reboot
   NetWaitSec           = 10      # espera entre sondas de DNS

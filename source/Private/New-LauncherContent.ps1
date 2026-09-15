@@ -13,9 +13,13 @@ function New-LauncherContent(
 rem APP_NAME - liga o WSL, garante desktop+RDP e abre o mstsc
 setlocal
 set DISTRO=DISTRO_VAL
-set WSL=C:\Windows\System32\wsl.exe
-set MSTSC=C:\Windows\System32\mstsc.exe
+set SYS32=%SystemRoot%\System32
+if exist "%SystemRoot%\Sysnative\cmd.exe" set SYS32=%SystemRoot%\Sysnative
+set WSL=%SYS32%\wsl.exe
+set MSTSC=%SYS32%\mstsc.exe
 set RDPPATH=%LOCALAPPDATA%\Programs\APP_NAME\APP_NAME.rdp
+if not exist "%WSL%" (echo ERRO: wsl.exe nao encontrado em %WSL% & pause & exit /b 1)
+if not exist "%MSTSC%" (echo ERRO: mstsc.exe nao encontrado em %MSTSC% & pause & exit /b 1)
 set WSL_IP=127.0.0.1
 IPDISCOVERY_VAL
 if "%WSL_IP%"=="" (
