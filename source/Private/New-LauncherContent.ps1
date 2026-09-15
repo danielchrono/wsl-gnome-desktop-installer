@@ -20,6 +20,7 @@ if exist "%SystemRoot%\Sysnative\cmd.exe" set SYS32=%SystemRoot%\Sysnative
 set WSL=%SYS32%\wsl.exe
 set MSTSC=%SYS32%\mstsc.exe
 set RDPPATH=%LOCALAPPDATA%\Programs\APP_NAME\APP_NAME.rdp
+set CREDHELPER=%LOCALAPPDATA%\Programs\APP_NAME\APP_NAME-Cred.ps1
 if not exist "%WSL%" (echo ERRO: wsl.exe nao encontrado em %WSL% & pause & exit /b 1)
 rem Sem mstsc, abre pelo cliente reserva no WSL (vazio = sem reserva, erro abaixo)
 if not exist "%MSTSC%" if "FREERDP_VAL"=="" (echo ERRO: mstsc.exe nao encontrado em %MSTSC% & pause & exit /b 1)
@@ -32,7 +33,15 @@ if "%WSL_IP%"=="" (
 )
 %WSL% -d %DISTRO% -u LINUXUSER_VAL --exec env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start SHELLSVC_VAL RDPSVC_VAL.service >nul 2>&1
 RDPREWRITE_VAL
-if exist "%MSTSC%" (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (%WSL% -d %DISTRO% -u LINUXUSER_VAL -- FREERDP_VAL "W_RDP_VAL")
+rem Sem arquivo no caminho diario: credencial no Cofre do Windows (sem aviso de
+rem fornecedor). Se falhar, volta ao .rdp (comportamento anterior, nunca pior).
+if not exist "%MSTSC%" goto :FREERDP
+powershell -NoProfile -ExecutionPolicy Bypass -File "%CREDHELPER%" "%RDPPATH%" "%WSL_IP%" RDP_PORT_VAL >nul 2>&1
+if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL)
+goto :ENDLAUNCH
+:FREERDP
+%WSL% -d %DISTRO% -u LINUXUSER_VAL -- FREERDP_VAL "W_RDP_VAL"
+:ENDLAUNCH
 '@
   return ($cmd -replace "APP_NAME", $AppName -replace "DISTRO_VAL", $Distro `
     -replace "LINUXUSER_VAL", $LinuxUser -replace "RDPREWRITE_VAL", $RewriteBlock `

@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "92cfaae5a4c6"
+$SCRIPT_BUILD = "7eeac7c10e0e"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -684,6 +684,7 @@ if exist "%SystemRoot%\Sysnative\cmd.exe" set SYS32=%SystemRoot%\Sysnative
 set WSL=%SYS32%\wsl.exe
 set MSTSC=%SYS32%\mstsc.exe
 set RDPPATH=%LOCALAPPDATA%\Programs\APP_NAME\APP_NAME.rdp
+set CREDHELPER=%LOCALAPPDATA%\Programs\APP_NAME\APP_NAME-Cred.ps1
 if not exist "%WSL%" (echo ERRO: wsl.exe nao encontrado em %WSL% & pause & exit /b 1)
 rem Sem mstsc, abre pelo cliente reserva no WSL (vazio = sem reserva, erro abaixo)
 if not exist "%MSTSC%" if "FREERDP_VAL"=="" (echo ERRO: mstsc.exe nao encontrado em %MSTSC% & pause & exit /b 1)
@@ -696,7 +697,15 @@ if "%WSL_IP%"=="" (
 )
 %WSL% -d %DISTRO% -u LINUXUSER_VAL --exec env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start SHELLSVC_VAL RDPSVC_VAL.service >nul 2>&1
 RDPREWRITE_VAL
-if exist "%MSTSC%" (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (%WSL% -d %DISTRO% -u LINUXUSER_VAL -- FREERDP_VAL "W_RDP_VAL")
+rem Sem arquivo no caminho diario: credencial no Cofre do Windows (sem aviso de
+rem fornecedor). Se falhar, volta ao .rdp (comportamento anterior, nunca pior).
+if not exist "%MSTSC%" goto :FREERDP
+powershell -NoProfile -ExecutionPolicy Bypass -File "%CREDHELPER%" "%RDPPATH%" "%WSL_IP%" RDP_PORT_VAL >nul 2>&1
+if errorlevel 1 (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (start "APP_NAME" %MSTSC% /v:%WSL_IP%:RDP_PORT_VAL)
+goto :ENDLAUNCH
+:FREERDP
+%WSL% -d %DISTRO% -u LINUXUSER_VAL -- FREERDP_VAL "W_RDP_VAL"
+:ENDLAUNCH
 '@
   return ($cmd -replace "APP_NAME", $AppName -replace "DISTRO_VAL", $Distro `
     -replace "LINUXUSER_VAL", $LinuxUser -replace "RDPREWRITE_VAL", $RewriteBlock `
@@ -705,6 +714,33 @@ if exist "%MSTSC%" (start "APP_NAME" "%MSTSC%" "%RDPPATH%") else (%WSL% -d %DIST
     -replace "RDPSVC_VAL", $script:UbuntuGuiDefaults.RdpService `
     -replace "IPDISCOVERY_VAL", $DiscoveryBlock `
     -replace "FREERDP_VAL", $FreeRdpBin -replace "W_RDP_VAL", $WRdpPath)
+}
+# Gera o helper que grava a credencial RDP no Cofre do Windows (Credential Manager)
+# para o mstsc abrir sem o aviso de fornecedor (sem precisar do .rdp assinado).
+# Estatico (sem placeholder): recebe RdpPath, Host e Port por argumento e le o
+# usuario/blob DPAPI do proprio .rdp (a senha nunca fica em texto no disco).
+# Falha nunca e fatal: o launcher volta ao .rdp quando sai codigo != 0.
+function New-CredHelperContent {
+  return @'
+param([string]$RdpPath, [string]$RdpHost, [int]$RdpPort)
+try {
+  $lines = [IO.File]::ReadAllLines($RdpPath)
+  $u = @($lines | Where-Object { $_ -like 'username:s:*' })[0] -replace '^username:s:', ''
+  $h = @($lines | Where-Object { $_ -like 'password 51:b:*' })[0] -replace '^password 51:b:', ''
+  if ([string]::IsNullOrEmpty($u) -or [string]::IsNullOrEmpty($h)) { exit 1 }
+  $raw = New-Object byte[] ($h.Length / 2)
+  for ($i = 0; $i -lt $h.Length; $i += 2) { $raw[$i / 2] = [Convert]::ToByte($h.Substring($i, 2), 16) }
+  Add-Type -AssemblyName System.Security
+  $pass = [Text.Encoding]::Unicode.GetString([Security.Cryptography.ProtectedData]::Unprotect($raw, $null, 'CurrentUser'))
+  if ([string]::IsNullOrEmpty($pass)) { exit 1 }
+  $cs = 'using System; using System.Runtime.InteropServices; public static class CredMan { [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct CREDENTIAL { public UInt32 Flags; public UInt32 Type; [MarshalAs(UnmanagedType.LPWStr)] public string TargetName; [MarshalAs(UnmanagedType.LPWStr)] public string Comment; public UInt64 LastWritten; public UInt32 CredentialBlobSize; public IntPtr CredentialBlob; public UInt32 Persist; public UInt32 AttributeCount; public IntPtr Attributes; [MarshalAs(UnmanagedType.LPWStr)] public string TargetAlias; [MarshalAs(UnmanagedType.LPWStr)] public string UserName; } [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "CredWriteW")] public static extern bool Write(ref CREDENTIAL cred, UInt32 flags); public static bool Save(string target, string user, string secret) { byte[] b = System.Text.Encoding.Unicode.GetBytes(secret); IntPtr p = Marshal.AllocCoTaskMem(b.Length); Marshal.Copy(b, 0, p, b.Length); CREDENTIAL c = new CREDENTIAL(); c.Flags = 0; c.Type = 1; c.TargetName = target; c.CredentialBlobSize = (UInt32)b.Length; c.CredentialBlob = p; c.Persist = 3; c.UserName = user; bool ok = Write(ref c, 0); Marshal.FreeCoTaskMem(p); return ok; } }'
+  Add-Type -TypeDefinition $cs -Language CSharp
+  $ok = $true
+  foreach ($t in @("TERMSRV/$RdpHost", "TERMSRV/${RdpHost}:$RdpPort")) { if (-not [CredMan]::Save($t, $u, $pass)) { $ok = $false } }
+  if (-not $ok) { exit 1 }
+} catch { exit 1 }
+exit 0
+'@
 }
 # Retomada sozinha apos reboot: salva respostas (senha em DPAPI, so este usuario le),
 # copia o script em execucao p/ a pasta do app e agenda reabertura via RunOnce.
@@ -1391,6 +1427,11 @@ $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
   -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath
 [IO.File]::WriteAllText($CmdPath, $cmd)
 Ok "Script em $CmdPath"
+# Helper que grava a credencial no Cofre do Windows (login sem aviso de fornecedor).
+$CredHelperPath = Join-Path $ProgDir "$APP_NAME-Cred.ps1"
+[IO.File]::WriteAllText($CredHelperPath, (New-CredHelperContent))
+if (Test-Path $CredHelperPath) { Ok "Login sem aviso via Cofre do Windows" }
+else { Warn "Helper de credencial nao criado (segue pelo .rdp)" }
 
 # .rdp com login automatico: senha em blob DPAPI (so este usuario Windows le)
 $RdpPath = Join-Path $ProgDir "$APP_NAME.rdp"

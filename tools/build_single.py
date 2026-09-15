@@ -34,6 +34,7 @@ FUNC_FILES = [
     os.path.join('Private', 'Show-TuiMenu.ps1'),
     os.path.join('Private', 'New-RdpFileContent.ps1'),
     os.path.join('Private', 'New-LauncherContent.ps1'),
+    os.path.join('Private', 'New-CredHelperContent.ps1'),
     os.path.join('Private', 'Save-ResumeState.ps1'),
     os.path.join('Private', 'New-PublisherCertificate.ps1'),
     os.path.join('Public', 'Install-WslUbuntuGui.ps1'),

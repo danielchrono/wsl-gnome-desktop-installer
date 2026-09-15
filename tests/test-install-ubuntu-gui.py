@@ -61,6 +61,8 @@ check('cofre desbloqueado antes do set-credentials', 'gnome-keyring-daemon --unl
 check('rdp sem aviso de cert autoassinado', "'authentication level:i:0'" in src)
 check('rdp abre em janela (nao tela cheia)', "'screen mode id:i:1'" in src)
 check('rdp redireciona USB do host', "'usbdevicestoredirect:s:*'" in src)
+check('login sem aviso via Cofre do Windows (TERMSRV)', 'CredWriteW' in src and 'TERMSRV/' in src and 'Unprotect' in src and '-Cred.ps1' in src)
+check('launcher prefere mstsc sem arquivo (fallback preservado)', 'CREDHELPER' in src and '/v:%WSL_IP%:RDP_PORT_VAL' in src and '"%RDPPATH%"' in src)
 check('rdp assinado (rdpsign)', 'rdpsign.exe' in src and 'signature:s:' in src)
 check('publicador confiavel idempotente', 'TrustedPublishers' in src and 'CN=Ubuntu-GUI RDP' in src)
 check('launcher fixo preserva assinatura', 'RDPREWRITE_VAL' in src and 'nao alterar' in src)

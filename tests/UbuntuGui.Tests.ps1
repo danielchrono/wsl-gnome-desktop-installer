@@ -99,6 +99,10 @@ Describe 'New-LauncherContent' {
   It 'com reserva nao deixa placeholder' {
     $f | Should Not Match 'FREERDP_VAL|W_RDP_VAL'
   }
+  It 'tenta login sem aviso via cofre antes do rdp' {
+    $c | Should Match 'CREDHELPER'
+    $c | Should Match '/v:'
+  }
 }
 
 Describe 'Test-LinuxUserName' {

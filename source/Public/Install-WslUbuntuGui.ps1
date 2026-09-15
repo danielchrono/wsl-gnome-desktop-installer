@@ -640,6 +640,11 @@ $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
   -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath
 [IO.File]::WriteAllText($CmdPath, $cmd)
 Ok "Script em $CmdPath"
+# Helper que grava a credencial no Cofre do Windows (login sem aviso de fornecedor).
+$CredHelperPath = Join-Path $ProgDir "$APP_NAME-Cred.ps1"
+[IO.File]::WriteAllText($CredHelperPath, (New-CredHelperContent))
+if (Test-Path $CredHelperPath) { Ok "Login sem aviso via Cofre do Windows" }
+else { Warn "Helper de credencial nao criado (segue pelo .rdp)" }
 
 # .rdp com login automatico: senha em blob DPAPI (so este usuario Windows le)
 $RdpPath = Join-Path $ProgDir "$APP_NAME.rdp"
