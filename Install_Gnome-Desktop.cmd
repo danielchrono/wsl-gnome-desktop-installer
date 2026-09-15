@@ -12,6 +12,27 @@ exit /b 0
 param([switch]$Resume, [switch]$Unattended)
 $SCRIPT_VERSION = "0.1.0"
 try { Start-Transcript -Path (Join-Path $env:TEMP 'Ubuntu-GUI-install.log') -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
+# Auto-elevacao: varios pontos exigem admin (WSL, mstsc, CFA). Relanca elevado
+# com UM clique no UAC - bypass silencioso nao existe (seria vulnerabilidade).
+# -Unattended nunca relanca (ninguem clicaria no UAC: rode o .cmd ja elevado).
+if (-not $Unattended) {
+  $isAdminHead = $false
+  try { $isAdminHead = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $isAdminHead = $false }
+  if (-not $isAdminHead) {
+    try {
+      Write-Host "  Elevando a admin (confirme no UAC uma vez)..." -ForegroundColor Yellow
+      $psExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+      if ((-not [Environment]::Is64BitProcess) -and (Test-Path "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0\powershell.exe")) { $psExe = "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
+      $psiArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
+      if ($Resume) { $psiArgs += ' -Resume' }
+      Start-Process -FilePath $psExe -ArgumentList $psiArgs -Verb RunAs -Wait -ErrorAction Stop
+      exit 0
+    } catch { Write-Host "  Sem elevacao: segue sem admin (algumas etapas avisam e pulam)..." -ForegroundColor Yellow }
+  }
+}
+
+$SCRIPT_BUILD = "beac049235c7"
+Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
 # Install-WslUbuntuGui mapeia para locais curtas ($RDP_PORT, $MinBuild, ...);
 # Private/* leem via $script:UbuntuGuiDefaults (vale no modulo e no .cmd).
@@ -22,6 +43,9 @@ $script:UbuntuGuiDefaults = @{
   RdpPort              = 3390    # longe da 3389 (erro 0x708 no loopback)
   AppName              = 'Ubuntu-GUI'
   IconUrl              = 'https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512'
+  MstscSetupUrl64      = 'https://go.microsoft.com/fwlink/?linkid=2247659'   # mstsc 64-bit (doc MS: desinstalavel desde 23H2)
+  MstscSetupUrl32      = 'https://go.microsoft.com/fwlink/?linkid=2247660'   # mstsc 32-bit
+  MstscSetupUrlArm64   = 'https://go.microsoft.com/fwlink/?linkid=2247577'   # mstsc ARM64
   MinBuildMirrored     = 22621   # Win11 22H2+: mirrored networking
   CredTimeoutSec       = 60      # timeout por tentativa de set-credentials
   CredRetries          = 2       # tentativas de gravacao no cofre
@@ -723,7 +747,7 @@ function Install-WslUbuntuGui {
   3. Desabilita o GDM, configura o ambiente WSLg no .bashrc
   4. Le a resolucao do monitor Windows e cria o monitor virtual igual
   5. Sobe o GNOME headless + RDP com TLS e credencial no cofre
-  6. Baixa o icone oficial do Ubuntu, cria o .cmd e os atalhos
+  6. Baixa o icone oficial do Ubuntu, restaura o mstsc se ausente, cria o .cmd e os atalhos
 #>
 [CmdletBinding()]
 param(
@@ -1220,7 +1244,8 @@ else { Fail "RDP nao subiu"; throw "RDP nao subiu" }
 try {
   $tlsPem = (Invoke-Wsl $LinuxUser "cat $TlsCertPath 2>/dev/null").Out
   $tlsB64 = ($tlsPem -replace '-----(BEGIN|END) CERTIFICATE-----', '') -replace '\s', ''
-  $tlsCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2([Convert]::FromBase64String($tlsB64))
+  $tlsBytes = [Convert]::FromBase64String($tlsB64)
+  $tlsCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2(,$tlsBytes)
   $tlsStore = New-Object Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
   $tlsStore.Open('ReadWrite')
   try {
@@ -1232,6 +1257,44 @@ try {
 
 # ============================== 6. ICONE + ATALHOS ==============================
 Step "6/7 Icone e atalhos ($APP_NAME)"
+# Cliente RDP desinstalavel desde 23H2 (doc MS): se sumiu, reinstala pelo
+# instalador oficial (silencioso). Nunca fatal: sem mstsc o resto instala
+# igual, so o atalho nao abre (espelha a checagem do launcher).
+$mstscSys = "$env:SystemRoot\System32"
+if ((-not [Environment]::Is64BitProcess) -and (Test-Path "$env:SystemRoot\Sysnative\mstsc.exe")) { $mstscSys = "$env:SystemRoot\Sysnative" }
+$mstscExe = Join-Path $mstscSys "mstsc.exe"
+if (-not (Test-Path $mstscExe)) {
+  $procArch = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE")
+  if ([string]::IsNullOrEmpty($procArch)) { $procArch = "AMD64" }
+  $mstscUrl = if ($procArch -eq "ARM64") { $D.MstscSetupUrlArm64 } elseif ($procArch -eq "x86") { $D.MstscSetupUrl32 } else { $D.MstscSetupUrl64 }
+  $isAdmin = $false
+  try { $isAdmin = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $isAdmin = $false }
+  if (-not $isAdmin) {
+    Warn "mstsc.exe ausente - rode como admin p/ reinstalar sozinho (ou instale: $mstscUrl)"
+  } else {
+    $mstscSetup = Join-Path $env:TEMP "mstsc-setup.exe"
+    Write-Host "  Baixando o cliente RDP oficial (mstsc)..." -ForegroundColor Yellow
+    try {
+      (New-Object Net.WebClient).DownloadFile($mstscUrl, $mstscSetup)
+      # So executa se for Microsoft assinado (tamanho sozinho nao prova nada:
+      # o fwlink pode entregar stub pequeno legitimo ou pagina de erro).
+      $mstscSigOk = $false
+      try {
+        $mstscSig = Get-AuthenticodeSignature $mstscSetup -ErrorAction Stop
+        $mstscSigOk = ($mstscSig.Status -eq 'Valid') -and ($mstscSig.SignerCertificate.Subject -match 'Microsoft Corporation')
+      } catch { $mstscSigOk = $false }
+      $mstscSize = (Get-Item $mstscSetup).Length
+      if (-not $mstscSigOk -and $mstscSize -lt 1MB) { Warn "Download do mstsc suspeito ($mstscSize bytes, sem assinatura Microsoft) - instale manual: $mstscUrl" }
+      else {
+        if (-not $mstscSigOk) { Warn "Setup do mstsc sem assinatura verificavel ($mstscSize bytes) - tentando mesmo assim" }
+        $mstscProc = Start-Process -FilePath $mstscSetup -Wait -PassThru
+        if (-not (Test-Path $mstscExe)) { Start-Sleep -Seconds 15 }
+        if (Test-Path $mstscExe) { Ok "Cliente RDP (mstsc) restaurado"; Remove-Item $mstscSetup -Force -ErrorAction SilentlyContinue }
+        else { Warn "Instalador do mstsc saiu com codigo $($mstscProc.ExitCode) mas o exe segue ausente ($mstscSetup guardado)" }
+      }
+    } catch { Warn "mstsc nao restaurado ($($_.Exception.Message)) - instale manual: $mstscUrl" }
+  }
+}
 foreach ($d in @($IconsDir, $ProgDir)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }

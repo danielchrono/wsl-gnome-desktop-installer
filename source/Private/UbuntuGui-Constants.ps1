@@ -8,6 +8,9 @@ $script:UbuntuGuiDefaults = @{
   RdpPort              = 3390    # longe da 3389 (erro 0x708 no loopback)
   AppName              = 'Ubuntu-GUI'
   IconUrl              = 'https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512'
+  MstscSetupUrl64      = 'https://go.microsoft.com/fwlink/?linkid=2247659'   # mstsc 64-bit (doc MS: desinstalavel desde 23H2)
+  MstscSetupUrl32      = 'https://go.microsoft.com/fwlink/?linkid=2247660'   # mstsc 32-bit
+  MstscSetupUrlArm64   = 'https://go.microsoft.com/fwlink/?linkid=2247577'   # mstsc ARM64
   MinBuildMirrored     = 22621   # Win11 22H2+: mirrored networking
   CredTimeoutSec       = 60      # timeout por tentativa de set-credentials
   CredRetries          = 2       # tentativas de gravacao no cofre

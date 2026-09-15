@@ -16,7 +16,7 @@ function Install-WslUbuntuGui {
   3. Desabilita o GDM, configura o ambiente WSLg no .bashrc
   4. Le a resolucao do monitor Windows e cria o monitor virtual igual
   5. Sobe o GNOME headless + RDP com TLS e credencial no cofre
-  6. Baixa o icone oficial do Ubuntu, cria o .cmd e os atalhos
+  6. Baixa o icone oficial do Ubuntu, restaura o mstsc se ausente, cria o .cmd e os atalhos
 #>
 [CmdletBinding()]
 param(
@@ -513,7 +513,8 @@ else { Fail "RDP nao subiu"; throw "RDP nao subiu" }
 try {
   $tlsPem = (Invoke-Wsl $LinuxUser "cat $TlsCertPath 2>/dev/null").Out
   $tlsB64 = ($tlsPem -replace '-----(BEGIN|END) CERTIFICATE-----', '') -replace '\s', ''
-  $tlsCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2([Convert]::FromBase64String($tlsB64))
+  $tlsBytes = [Convert]::FromBase64String($tlsB64)
+  $tlsCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2(,$tlsBytes)
   $tlsStore = New-Object Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
   $tlsStore.Open('ReadWrite')
   try {
@@ -525,6 +526,44 @@ try {
 
 # ============================== 6. ICONE + ATALHOS ==============================
 Step "6/7 Icone e atalhos ($APP_NAME)"
+# Cliente RDP desinstalavel desde 23H2 (doc MS): se sumiu, reinstala pelo
+# instalador oficial (silencioso). Nunca fatal: sem mstsc o resto instala
+# igual, so o atalho nao abre (espelha a checagem do launcher).
+$mstscSys = "$env:SystemRoot\System32"
+if ((-not [Environment]::Is64BitProcess) -and (Test-Path "$env:SystemRoot\Sysnative\mstsc.exe")) { $mstscSys = "$env:SystemRoot\Sysnative" }
+$mstscExe = Join-Path $mstscSys "mstsc.exe"
+if (-not (Test-Path $mstscExe)) {
+  $procArch = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE")
+  if ([string]::IsNullOrEmpty($procArch)) { $procArch = "AMD64" }
+  $mstscUrl = if ($procArch -eq "ARM64") { $D.MstscSetupUrlArm64 } elseif ($procArch -eq "x86") { $D.MstscSetupUrl32 } else { $D.MstscSetupUrl64 }
+  $isAdmin = $false
+  try { $isAdmin = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $isAdmin = $false }
+  if (-not $isAdmin) {
+    Warn "mstsc.exe ausente - rode como admin p/ reinstalar sozinho (ou instale: $mstscUrl)"
+  } else {
+    $mstscSetup = Join-Path $env:TEMP "mstsc-setup.exe"
+    Write-Host "  Baixando o cliente RDP oficial (mstsc)..." -ForegroundColor Yellow
+    try {
+      (New-Object Net.WebClient).DownloadFile($mstscUrl, $mstscSetup)
+      # So executa se for Microsoft assinado (tamanho sozinho nao prova nada:
+      # o fwlink pode entregar stub pequeno legitimo ou pagina de erro).
+      $mstscSigOk = $false
+      try {
+        $mstscSig = Get-AuthenticodeSignature $mstscSetup -ErrorAction Stop
+        $mstscSigOk = ($mstscSig.Status -eq 'Valid') -and ($mstscSig.SignerCertificate.Subject -match 'Microsoft Corporation')
+      } catch { $mstscSigOk = $false }
+      $mstscSize = (Get-Item $mstscSetup).Length
+      if (-not $mstscSigOk -and $mstscSize -lt 1MB) { Warn "Download do mstsc suspeito ($mstscSize bytes, sem assinatura Microsoft) - instale manual: $mstscUrl" }
+      else {
+        if (-not $mstscSigOk) { Warn "Setup do mstsc sem assinatura verificavel ($mstscSize bytes) - tentando mesmo assim" }
+        $mstscProc = Start-Process -FilePath $mstscSetup -Wait -PassThru
+        if (-not (Test-Path $mstscExe)) { Start-Sleep -Seconds 15 }
+        if (Test-Path $mstscExe) { Ok "Cliente RDP (mstsc) restaurado"; Remove-Item $mstscSetup -Force -ErrorAction SilentlyContinue }
+        else { Warn "Instalador do mstsc saiu com codigo $($mstscProc.ExitCode) mas o exe segue ausente ($mstscSetup guardado)" }
+      }
+    } catch { Warn "mstsc nao restaurado ($($_.Exception.Message)) - instale manual: $mstscUrl" }
+  }
+}
 foreach ($d in @($IconsDir, $ProgDir)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }

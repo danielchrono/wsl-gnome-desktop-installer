@@ -90,6 +90,13 @@ check('launcher resolve System32 via Sysnative', 'set SYS32=' in src and 'set MS
 check('senha com retry (nao mata o run)', 'PasswordMaxAttempts' in src and 'tente de novo' in src and 'Test-PasswordConfirmation' in src)
 check('CFA: libera com permissao, atalho nunca fatal', 'ControlledFolderAccessAllowedApplications' in src and 'EnableControlledFolderAccess' in src and 'Atalhos nao criados' not in src)
 check('cert TLS confiavel no Root (sem admin)', "X509Store('Root', 'CurrentUser')" in src)
+check('cert sem unroll de bytes no construtor', '(,$tlsBytes)' in src)
+check('mstsc: tamanho e exit code diagnosticados', 'Download do mstsc suspeito' in src and 'ExitCode' in src)
+check('mstsc reinstalado sozinho quando ausente', 'linkid=2247659' in src and 'Cliente RDP (mstsc) restaurado' in src)
+check('mstsc: so executa se assinado Microsoft', 'Authenticode' in src and 'Microsoft Corporation' in src)
+check('auto-elevacao com UAC (sem bypass)', '-Verb RunAs' in src and 'Auto-elevacao' in src and 'Unattended nunca relanca' in src)
+check('build carimbado (id deterministico)', '__BUILD_ID__' not in src and '$SCRIPT_BUILD' in src)
+check('build id e hex de 12', re.search(r'\$SCRIPT_BUILD = "[0-9a-f]{12}"', src) is not None)
 check('limpa retomada no sucesso', 'Clear-ResumeState' in src)
 check('versao 0.1.0', 'SCRIPT_VERSION' in src and '"0.1.0"' in src)
 tracked = []
