@@ -49,6 +49,40 @@ function Start-WslKeyringDaemon([string]$LinuxUser, [string]$Uid) {
   return $false
 }
 
+# Cria o login.keyring via PAM do sudo com a senha informada (o PAM cria com o
+# authtok quando o arquivo nao existe; revertido em seguida pelo chamador via
+# verificacao de /etc/pam.d/sudo). Puro de View (sem Ok/Fail: retorna
+# @{ Created; Fresh }). Idempotente: arquivo existente = Created sem tocar PAM.
+function New-WslLoginKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$KeyringPath, [string]$PamSudoPath) {
+  $r = Invoke-Wsl $LinuxUser "test -f $KeyringPath && echo OK || echo MISSING"
+  if ($r.Out -match "OK") { return @{ Created = $true; Fresh = $false } }
+  $pamAdd = "printf '%s\nauth optional pam_gnome_keyring.so\nsession optional pam_gnome_keyring.so auto_start\n' '$PasswordQuote' | sudo -S tee -a $PamSudoPath > /dev/null"
+  Invoke-Wsl $LinuxUser "$pamAdd && printf '%s\n' '$PasswordQuote' | sudo -S true && printf '%s\n' '$PasswordQuote' | sudo -S sed -i '/pam_gnome_keyring.so/d' $PamSudoPath" | Out-Null
+  $r2 = Invoke-Wsl $LinuxUser "test -f $KeyringPath && echo OK || echo MISSING"
+  $created = ($r2.Out -match "OK")
+  return @{ Created = $created; Fresh = $created }
+}
+
+# Recria o login.keyring com a senha informada quando a senha do cofre
+# existente nao confere (mismatch: sudo passa, cofre fica trancado). Backup
+# com timestamp ANTES; se a criacao falhar, restaura o original e retorna
+# Recreated=$false (nunca perde o arquivo). Daemon proprio reiniciado apos
+# criar: o servidor carrega o keyring no startup, e sem restart ele serviria
+# a colecao velha em memoria. Retorna @{ Recreated; Backup }.
+function Reset-WslLoginKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid, [string]$KeyringPath, [string]$PamSudoPath) {
+  $ts = (Invoke-Wsl $LinuxUser "date +%Y%m%d-%H%M%S").Out.Trim()
+  $backup = "$KeyringPath.bak-$ts"
+  Invoke-Wsl $LinuxUser "mv $KeyringPath $backup 2>/dev/null; echo MOVED" | Out-Null
+  $kc = New-WslLoginKeyring -LinuxUser $LinuxUser -PasswordQuote $PasswordQuote -KeyringPath $KeyringPath -PamSudoPath $PamSudoPath
+  if (-not $kc.Created) {
+    Invoke-Wsl $LinuxUser "mv $backup $KeyringPath 2>/dev/null; echo RESTORED" | Out-Null
+    return @{ Recreated = $false; Backup = $backup }
+  }
+  Invoke-Wsl $LinuxUser "pkill -f '[g]nome-keyring-daemon' 2>/dev/null; sleep 1; echo REINICIADO" | Out-Null
+  Start-WslKeyringDaemon -LinuxUser $LinuxUser -Uid $Uid | Out-Null
+  return @{ Recreated = $true; Backup = $backup }
+}
+
 # Desbloqueia o cofre 'login' com a senha informada. Retorna @{ Code; Out }.
 # Code != 0 = senha nao confere ou daemon fora: o chamador falha rapido com
 # instrucao (nunca retry cego que queima 2x60s). PIPESTATUS[1] e o exit do

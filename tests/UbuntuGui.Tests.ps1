@@ -292,6 +292,81 @@ Describe 'Start-WslKeyringDaemon' {
   }
 }
 
+Describe 'New-WslLoginKeyring' {
+  It 'arquivo existente retorna Created sem tocar no PAM' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      $script:cmds = @()
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) $script:cmds += $Command; return @{ Code = 0; Out = 'OK' } }
+        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -KeyringPath 'K' -PamSudoPath 'P'
+        @($r.Created, $r.Fresh, ($script:cmds -join '|' -match 'tee')) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'True,False,False'
+  }
+  It 'ausente e PAM cria retorna Fresh' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      $script:n = 0; $script:cmds = @()
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          $script:cmds += $Command
+          if ($Command -match 'test -f') { $script:n++; if ($script:n -eq 1) { return @{ Code = 0; Out = 'MISSING' } } return @{ Code = 0; Out = 'OK' } }
+          return @{ Code = 0; Out = '' } }
+        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -KeyringPath 'K' -PamSudoPath 'P'
+        @($r.Created, $r.Fresh, ($script:cmds -join '|' -match 'tee -a')) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'True,True,True'
+  }
+  It 'PAM nao cria retorna Created False' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'MISSING' } }
+        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -KeyringPath 'K' -PamSudoPath 'P'
+        @($r.Created, $r.Fresh) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'False,False'
+  }
+}
+
+Describe 'Reset-WslLoginKeyring' {
+  It 'recria com backup, reinicia daemon e retorna Backup' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      $realSleep = ${function:Start-Sleep}
+      $script:n = 0; $script:cmds = @()
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          $script:cmds += $Command
+          if ($Command -match 'date \+') { return @{ Code = 0; Out = '20260915-000000' } }
+          if ($Command -match 'test -f') { $script:n++; if ($script:n -eq 1) { return @{ Code = 0; Out = 'MISSING' } } return @{ Code = 0; Out = 'OK' } }
+          if ($Command -match 'get-property') { return @{ Code = 0; Out = 'b true' } }
+          return @{ Code = 0; Out = '' } }
+        ${function:Start-Sleep} = { param([int]$Seconds) }
+        $r = Reset-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K' -PamSudoPath 'P'
+        $joined = $script:cmds -join '|'
+        @($r.Recreated, ($r.Backup -match 'bak-'), ($joined -match 'pkill'), ($joined -match 'gnome-keyring-daemon --start')) -join ','
+      } finally { ${function:Invoke-Wsl} = $real; ${function:Start-Sleep} = $realSleep }
+    }) | Should Be 'True,True,True,True'
+  }
+  It 'criacao falha restaura o original e nao reinicia daemon' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      $script:cmds = @()
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          $script:cmds += $Command
+          if ($Command -match 'date \+') { return @{ Code = 0; Out = '20260915-000000' } }
+          return @{ Code = 0; Out = 'MISSING' } }
+        $r = Reset-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K' -PamSudoPath 'P'
+        $joined = $script:cmds -join '|'
+        @($r.Recreated, (@($script:cmds | Where-Object { $_ -match '^mv ' }).Count), ($joined -match 'pkill')) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'False,2,False'
+  }
+}
+
 Describe 'Repair-WslKeyringBus' {
   It 'mata estranho e reporta (sem tocar nos arquivos)' {
     (& (Get-Module UbuntuGui) {
