@@ -49,35 +49,33 @@ function Start-WslKeyringDaemon([string]$LinuxUser, [string]$Uid) {
   return $false
 }
 
-# Cria o login.keyring via PAM do sudo com a senha informada (o PAM cria com o
-# authtok quando o arquivo nao existe; revertido em seguida pelo chamador via
-# verificacao de /etc/pam.d/sudo). Puro de View (sem Ok/Fail: retorna
-# @{ Created; Fresh }). Idempotente: arquivo existente = Created sem tocar PAM.
-# O sudo faz env_reset e cegaria o modulo (sem bus ele falha silencioso por ser
-# optional): por isso o bus e exportado no shell e atravessa via --preserve-env.
-function New-WslLoginKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid, [string]$KeyringPath, [string]$PamSudoPath) {
-  $busEnv = New-WslSessionEnv -Uid $Uid
-  $preserve = "--preserve-env=XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS"
+# Sobe um daemon NOVO ja com a senha de login (o fluxo do login grafico:
+# 'daemon --daemonize --login' le a senha do stdin e cria+destravada a colecao
+# login, sem prompt, sem sudo, sem pam.d - provado ao vivo: arquivo persiste,
+# alias resolve, item grava). O pkill roda em chamada WSL SEPARADA do --login:
+# o padrao '[g]...' nunca divide a linha com o literal (senao o pkill se mata
+# - SIGTERM observado). Retorna @{ Started; State; Out }.
+function Start-WslLoginKeyringDaemon([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  Invoke-Wsl $LinuxUser "pkill -f '[g]nome-keyring-daemon' 2>/dev/null; sleep 1; echo REINICIADO" | Out-Null
+  $probeCmd = Get-WslKeyringProbeCommand -Uid $Uid
+  $r = Invoke-Wsl $LinuxUser "printf '%s' '$PasswordQuote' | $envPrefix gnome-keyring-daemon --daemonize --login >/dev/null 2>&1; sleep 2; $probeCmd"
+  $out = if ($r.Out) { $r.Out.Trim() } else { '' }
+  if (Test-UnlockedPropertyOutput -Out $out) { return @{ Started = $true; State = 'Unlocked'; Out = $out } }
+  if ($out -match 'b true') { return @{ Started = $true; State = 'Locked'; Out = $out } }
+  return @{ Started = $false; State = 'Error'; Out = $out }
+}
+
+# Cria o login.keyring com a senha informada quando ausente (via daemon
+# --login, que ja deixa destravado). Puro de View (sem Ok/Fail: retorna
+# @{ Created; Fresh }). Idempotente: arquivo existente = Created sem tocar nada.
+function New-WslLoginKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid, [string]$KeyringPath) {
   $r = Invoke-Wsl $LinuxUser "test -f $KeyringPath && echo OK || echo MISSING"
   if ($r.Out -match "OK") { return @{ Created = $true; Fresh = $false } }
-  $pamAdd = "printf '%s\nauth optional pam_gnome_keyring.so\nsession optional pam_gnome_keyring.so auto_start\n' '$PasswordQuote' | sudo -S tee -a $PamSudoPath > /dev/null"
-  Invoke-Wsl $LinuxUser "export $busEnv; $pamAdd && printf '%s\n' '$PasswordQuote' | sudo -S $preserve true && printf '%s\n' '$PasswordQuote' | sudo -S sed -i '/pam_gnome_keyring.so/d' $PamSudoPath" | Out-Null
+  Start-WslLoginKeyringDaemon -LinuxUser $LinuxUser -PasswordQuote $PasswordQuote -Uid $Uid | Out-Null
   $r2 = Invoke-Wsl $LinuxUser "test -f $KeyringPath && echo OK || echo MISSING"
   $created = ($r2.Out -match "OK")
   return @{ Created = $created; Fresh = $created }
-}
-
-# Destrava via PAM do sudo (auth com a senha: o modulo destrava com o authtok).
-# Caminho que funciona mesmo se o unlock por stdin for no-op: o PAM fala com o
-# daemon pelo bus da sessao (vars preservadas pelo sudo). So linha auth (sem
-# auto_start: o daemon ja esta no ar). Revertido em seguida com ';' (reverte
-# mesmo se o unlock falhar, p/ nao disparar falso "PAM adulterado").
-function Invoke-WslPamUnlock([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid, [string]$PamSudoPath) {
-  $busEnv = New-WslSessionEnv -Uid $Uid
-  $preserve = "--preserve-env=XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS"
-  $pamAdd = "printf '%s\nauth optional pam_gnome_keyring.so\n' '$PasswordQuote' | sudo -S tee -a $PamSudoPath > /dev/null"
-  $r = Invoke-Wsl $LinuxUser "export $busEnv; $pamAdd && printf '%s\n' '$PasswordQuote' | sudo -S $preserve true; printf '%s\n' '$PasswordQuote' | sudo -S sed -i '/pam_gnome_keyring.so/d' $PamSudoPath 2>&1 | tail -n 2"
-  return $r
 }
 
 # Recria o login.keyring com a senha informada quando a senha do cofre
@@ -86,18 +84,15 @@ function Invoke-WslPamUnlock([string]$LinuxUser, [string]$PasswordQuote, [string
 # Recreated=$false (nunca perde o arquivo). Daemon proprio reiniciado apos
 # criar: o servidor carrega o keyring no startup, e sem restart ele serviria
 # a colecao velha em memoria. Retorna @{ Recreated; Backup }.
-function Reset-WslLoginKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid, [string]$KeyringPath, [string]$PamSudoPath) {
+function Reset-WslLoginKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid, [string]$KeyringPath) {
   $ts = (Invoke-Wsl $LinuxUser "date +%Y%m%d-%H%M%S").Out.Trim()
   $backup = "$KeyringPath.bak-$ts"
   Invoke-Wsl $LinuxUser "mv $KeyringPath $backup 2>/dev/null; echo MOVED" | Out-Null
-  $kc = New-WslLoginKeyring -LinuxUser $LinuxUser -PasswordQuote $PasswordQuote -Uid $Uid -KeyringPath $KeyringPath -PamSudoPath $PamSudoPath
+  $kc = New-WslLoginKeyring -LinuxUser $LinuxUser -PasswordQuote $PasswordQuote -Uid $Uid -KeyringPath $KeyringPath
   if (-not $kc.Created) {
     Invoke-Wsl $LinuxUser "mv $backup $KeyringPath 2>/dev/null; echo RESTORED" | Out-Null
     return @{ Recreated = $false; Backup = $backup }
   }
-  Invoke-Wsl $LinuxUser "pkill -f '[g]nome-keyring-daemon' 2>/dev/null; sleep 1; echo REINICIADO" | Out-Null
-  Start-WslKeyringDaemon -LinuxUser $LinuxUser -Uid $Uid | Out-Null
-  Invoke-WslPamUnlock -LinuxUser $LinuxUser -PasswordQuote $PasswordQuote -Uid $Uid -PamSudoPath $PamSudoPath | Out-Null
   return @{ Recreated = $true; Backup = $backup }
 }
 

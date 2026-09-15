@@ -299,12 +299,12 @@ Describe 'New-WslLoginKeyring' {
       $script:cmds = @()
       try {
         ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) $script:cmds += $Command; return @{ Code = 0; Out = 'OK' } }
-        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K' -PamSudoPath 'P'
-        @($r.Created, $r.Fresh, ($script:cmds -join '|' -match 'tee')) -join ','
+        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K'
+        @($r.Created, $r.Fresh, $script:cmds.Count, ($script:cmds -join '|' -match '--login')) -join ','
       } finally { ${function:Invoke-Wsl} = $real }
-    }) | Should Be 'True,False,False'
+    }) | Should Be 'True,False,1,False'
   }
-  It 'ausente e PAM cria retorna Fresh' {
+  It 'ausente cria via --login e retorna Fresh (sem sudo/pam.d)' {
     (& (Get-Module UbuntuGui) {
       $real = ${function:Invoke-Wsl}
       $script:n = 0; $script:cmds = @()
@@ -312,60 +312,73 @@ Describe 'New-WslLoginKeyring' {
         ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
           $script:cmds += $Command
           if ($Command -match 'test -f') { $script:n++; if ($script:n -eq 1) { return @{ Code = 0; Out = 'MISSING' } } return @{ Code = 0; Out = 'OK' } }
+          if ($Command -match 'get-property') { return @{ Code = 0; Out = 'b false' } }
           return @{ Code = 0; Out = '' } }
-        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K' -PamSudoPath 'P'
-        @($r.Created, $r.Fresh, ($script:cmds -join '|' -match 'tee -a'), ($script:cmds -join '|' -match 'export XDG_RUNTIME_DIR'), ($script:cmds -join '|' -match 'preserve-env')) -join ','
+        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K'
+        $joined = $script:cmds -join '|'
+        @($r.Created, $r.Fresh, ($joined -match '--daemonize --login'), ($joined -match 'tee'), ($joined -match 'sudo')) -join ','
       } finally { ${function:Invoke-Wsl} = $real }
-    }) | Should Be 'True,True,True,True,True'
+    }) | Should Be 'True,True,True,False,False'
   }
-  It 'PAM nao cria retorna Created False' {
+  It '--login sem arquivo retorna Created False' {
     (& (Get-Module UbuntuGui) {
       $real = ${function:Invoke-Wsl}
       try {
         ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'MISSING' } }
-        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K' -PamSudoPath 'P'
+        $r = New-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K'
         @($r.Created, $r.Fresh) -join ','
       } finally { ${function:Invoke-Wsl} = $real }
     }) | Should Be 'False,False'
   }
 }
 
-Describe 'Invoke-WslPamUnlock' {
-  It 'usa so linha auth (sem auto_start), preserva bus e reverte' {
+Describe 'Start-WslLoginKeyringDaemon' {
+  It 'pkill e --login em chamadas separadas (anti-suicidio)' {
     (& (Get-Module UbuntuGui) {
       $real = ${function:Invoke-Wsl}
       $script:cmds = @()
       try {
-        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) $script:cmds += $Command; return @{ Code = 0; Out = '' } }
-        Invoke-WslPamUnlock -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -PamSudoPath 'P' | Out-Null
-        $joined = $script:cmds -join '|'
-        @(($joined -match 'auth optional pam_gnome_keyring'), ($joined -match 'auto_start'), ($joined -match 'preserve-env'), ($joined -match 'sed -i')) -join ','
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) $script:cmds += $Command; return @{ Code = 0; Out = 'b false' } }
+        $r = Start-WslLoginKeyringDaemon -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000'
+        $pk = @($script:cmds | Where-Object { $_ -match 'pkill' })[0]
+        $dl = @($script:cmds | Where-Object { $_ -match 'daemonize' })[0]
+        @($script:cmds.Count, $r.Started, $r.State, ($pk -notmatch 'daemonize'), ($dl -notmatch 'pkill')) -join ','
       } finally { ${function:Invoke-Wsl} = $real }
-    }) | Should Be 'True,False,True,True'
+    }) | Should Be '2,True,Unlocked,True,True'
+  }
+  It 'sonda trancada apos --login retorna Started com Locked' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          if ($Command -match 'get-property') { return @{ Code = 0; Out = 'b true' } }
+          return @{ Code = 0; Out = '' } }
+        $r = Start-WslLoginKeyringDaemon -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000'
+        @($r.Started, $r.State) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'True,Locked'
   }
 }
 
 Describe 'Reset-WslLoginKeyring' {
-  It 'recria com backup, reinicia daemon e retorna Backup' {
+  It 'recria via --login com backup (sem sudo/pam.d)' {
     (& (Get-Module UbuntuGui) {
       $real = ${function:Invoke-Wsl}
-      $realSleep = ${function:Start-Sleep}
       $script:n = 0; $script:cmds = @()
       try {
         ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
           $script:cmds += $Command
           if ($Command -match 'date \+') { return @{ Code = 0; Out = '20260915-000000' } }
           if ($Command -match 'test -f') { $script:n++; if ($script:n -eq 1) { return @{ Code = 0; Out = 'MISSING' } } return @{ Code = 0; Out = 'OK' } }
-          if ($Command -match 'get-property') { return @{ Code = 0; Out = 'b true' } }
+          if ($Command -match 'get-property') { return @{ Code = 0; Out = 'b false' } }
           return @{ Code = 0; Out = '' } }
-        ${function:Start-Sleep} = { param([int]$Seconds) }
-        $r = Reset-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K' -PamSudoPath 'P'
+        $r = Reset-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K'
         $joined = $script:cmds -join '|'
-        @($r.Recreated, ($r.Backup -match 'bak-'), ($joined -match 'pkill'), ($joined -match 'gnome-keyring-daemon --start'), ($joined -match 'auth optional pam_gnome_keyring')) -join ','
-      } finally { ${function:Invoke-Wsl} = $real; ${function:Start-Sleep} = $realSleep }
-    }) | Should Be 'True,True,True,True,True'
+        @($r.Recreated, ($r.Backup -match 'bak-'), ($joined -match '--daemonize --login'), ($joined -match 'tee'), ($joined -match 'sudo')) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'True,True,True,False,False'
   }
-  It 'criacao falha restaura o original e nao reinicia daemon' {
+  It 'criacao falha restaura o original (2 mvs)' {
     (& (Get-Module UbuntuGui) {
       $real = ${function:Invoke-Wsl}
       $script:cmds = @()
@@ -374,11 +387,10 @@ Describe 'Reset-WslLoginKeyring' {
           $script:cmds += $Command
           if ($Command -match 'date \+') { return @{ Code = 0; Out = '20260915-000000' } }
           return @{ Code = 0; Out = 'MISSING' } }
-        $r = Reset-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K' -PamSudoPath 'P'
-        $joined = $script:cmds -join '|'
-        @($r.Recreated, (@($script:cmds | Where-Object { $_ -match '^mv ' }).Count), ($joined -match 'pkill')) -join ','
+        $r = Reset-WslLoginKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000' -KeyringPath 'K'
+        @($r.Recreated, (@($script:cmds | Where-Object { $_ -match '^mv ' }).Count)) -join ','
       } finally { ${function:Invoke-Wsl} = $real }
-    }) | Should Be 'False,2,False'
+    }) | Should Be 'False,2'
   }
 }
 
