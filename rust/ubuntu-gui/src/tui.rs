@@ -123,7 +123,7 @@ fn interactive_menu(title: &str, options: &[String], initial: usize) -> Option<u
     use crossterm::cursor::{Hide, MoveTo, Show};
     use crossterm::event::{read, Event, KeyCode, KeyEventKind};
     use crossterm::execute;
-    use crossterm::terminal::{Clear, ClearType};
+    
 
     let mut stdout = io::stdout();
     let mut selected = initial;

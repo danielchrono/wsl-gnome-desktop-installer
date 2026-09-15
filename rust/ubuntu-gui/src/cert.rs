@@ -93,10 +93,10 @@ fn store_name_wide(name: &str) -> Vec<u16> {
 /// Procura em `CurrentUser\My` por Subject exato; devolve o thumbprint.
 #[cfg(windows)]
 fn find_in_my_store(subject: &str) -> Result<Option<String>, InstallError> {
-    use windows::core::PCWSTR;
+    
     use windows::Win32::Security::Cryptography::{
         CertCloseStore, CertFindCertificateInStore, CertGetNameStringW, CertOpenStore,
-        CERT_FIND_SUBJECT_STR_W, CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_OPEN_STORE_FLAGS,
+        CERT_FIND_SUBJECT_STR_W, CERT_OPEN_STORE_FLAGS,
         CERT_QUERY_ENCODING_TYPE, CERT_STORE_PROV_SYSTEM_W, X509_ASN_ENCODING,
     };
 
