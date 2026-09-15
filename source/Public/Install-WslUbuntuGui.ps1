@@ -193,6 +193,7 @@ if (-not $Resume) {
   # Modo de rede: [1] localhost fixo 127.0.0.1 via mirrored (recomendado, padrao: endpoint
   # estavel, sem redescoberta, assinatura do .rdp sempre valida) ou [2] IP dinamico
   # descoberto automaticamente a cada clique (p/ Windows sem mirrored).
+  # Deteccao automatica: mirrored ativo mas sem internet cai sozinho p/ dinamico.
   # View (TUI com fallback Read-Host); regra pura em Resolve-NetworkChoice.
   # -Unattended pula o prompt: vazio cai no padrao mirrored via Resolve-NetworkChoice.
   if ([string]::IsNullOrWhiteSpace($NetChoice) -and (-not $Unattended)) {
@@ -269,8 +270,20 @@ if ($UseMirrored) {
     $txt = $txt -replace '(?m)^(\[wsl2\].*)$', "`$1`r`nnetworkingMode=mirrored"
     [IO.File]::WriteAllText($wslCfg, $txt.Trim() + "`r`n")
     $wslRestartNeeded = $true
+    Ok "Mirrored networking (RDP fixo em 127.0.0.1 apos reiniciar)"
+  } else {
+    # Linha ja existia = mirrored ativo: valida antes de confiar. Sem rota
+    # externa no WSL (preview/VPN/firewall), volta ao NAT sozinho com dinamico.
+    $netUp = Invoke-Wsl $LinuxUser "ping -c 1 -W 4 1.1.1.1 2>&1 | grep -q '1 received\|1 packets received' && echo UP || echo DOWN"
+    if ("$($netUp.Out)" -match 'DOWN') {
+      Warn 'Mirrored ativo mas sem internet no WSL - voltando ao NAT com IP dinamico'
+      $txt = ($txt -split "`r?`n" | Where-Object { $_ -notmatch '^\s*networkingMode\s*=' }) -join "`r`n"
+      [IO.File]::WriteAllText($wslCfg, $txt.Trim() + "`r`n")
+      $UseMirrored = $false
+      wsl --shutdown
+      Ok 'NAT de volta (interrompeu o mirrored quebrado)'
+    } else { Ok "Mirrored networking (RDP fixo em 127.0.0.1)" }
   }
-  Ok "Mirrored networking (RDP fixo em 127.0.0.1)"
 } else {
   $RdpHost = Get-WslIpAddress -Distro $DISTRO
   Ok "IP dinamico - cada clique detecta sozinho ($RdpHost)"
@@ -705,7 +718,7 @@ if ($LiveFailures.Count -eq 0) {
   Write-Host "  Desktop : duplo clique em $APP_NAME (ou mstsc em ${ip}:$RDP_PORT)"
   Write-Host "  Login RDP : automatico (usuario e senha salvos no .rdp)"
   Write-Host "  Resolucao do desktop: $RES"
-  if ($wslRestartNeeded) { Write-Host "  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored" -ForegroundColor Yellow }
+  if ($wslRestartNeeded -and $UseMirrored) { Write-Host "  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored" -ForegroundColor Yellow }
 } else {
   Write-Host "TERMINOU COM FALHAS:" -ForegroundColor Red
   $script:Failures | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }

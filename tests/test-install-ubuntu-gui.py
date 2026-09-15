@@ -139,5 +139,7 @@ check('unlock/sonda via builders unicos', 'function Get-WslUnlockPipeline' in sr
 check('pula unlock se ja destravado + guia seahorse', 'Cofre ja destravado (pulando unlock)' in src and 'seahorse' in src and '$pamUnlocked' in install_src)
 check('teste de controle decide senha-errada vs unlock-quebrado', 'function Test-WslUnlockExitMeaningful' in src and 'ubuntugui-sonda-falsa-000' in src and 'Senha incorreta para o cofre existente' in src and 'recriando o cofre' in install_src)
 check('prestart do daemon antes do PAM', 'function Start-WslKeyringDaemon' in src and 'gnome-keyring-daemon --start' in src and 'Daemon do cofre no ar' in src)
+check('mirrored quebrado cai sozinho p/ NAT', 'Mirrored ativo mas sem internet' in src and '$UseMirrored = $false' in src)
+check('aviso de restart so com mirrored valendo', '$wslRestartNeeded -and $UseMirrored' in src)
 
 sys.exit(1 if fails else 0)
