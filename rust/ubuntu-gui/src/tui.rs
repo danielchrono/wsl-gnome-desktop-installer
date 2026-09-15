@@ -3,9 +3,12 @@
 //!
 //! Fallback `Read-Host` quando nao ha console interativo (pipe, `--no-tui`).
 //! Logica de indice pura em [`move_menu_index`] (cobre sem teclado).
-//! Redesenho: no Windows reposiciona o cursor (`SetCursorPosition`, sem
-//! flicker e sem DSR); no Unix limpa a tela (`Clear-Host`) — la, ler
-//! `CursorTop` expoe DSR via stdin e rouba bytes das setas/Enter (race).
+//! Redesenho: no Windows volta `frame_lines` linhas a partir da linha atual
+//! (`CursorTop - (N + 3)`, travado em 0) e reimprime o frame sobre ele mesmo
+//! — nunca no topo absoluto do buffer (era o `MoveTo(0, 0)` que empilhava uma
+//! linha por cima da outra). Sem DSR (Win32 le via API de console); no Unix
+//! limpa a tela (`Clear-Host`) — la, ler `CursorTop` expoe DSR via stdin e
+//! rouba bytes das setas/Enter (race).
 
 use std::io::{self, BufRead, IsTerminal, Write};
 
@@ -85,6 +88,19 @@ fn clamp_default(default_index: usize, count: usize) -> usize {
     }
 }
 
+/// Linhas impressas por frame do menu (`Show-SingleChoiceMenu`): 1 em branco
+/// + titulo + N opcoes + dica.
+pub fn menu_frame_lines(option_count: usize) -> u16 {
+    option_count.saturating_add(3).min(u16::MAX as usize) as u16
+}
+
+/// Linha-alvo do redesenho no Windows (paridade com o PowerShell):
+/// `$top = [Console]::CursorTop - ($Options.Count + 3)`, travado em 0.
+/// Sobe o relativo ao frame atual em vez do topo absoluto do buffer.
+pub fn menu_redraw_top(current_row: u16, frame_lines: u16) -> u16 {
+    current_row.saturating_sub(frame_lines)
+}
+
 /// Menu de escolha unica com setas + Enter (`Show-SingleChoiceMenu`).
 /// Retorna o indice 0-based selecionado. Fallback: prompt numerico via
 /// stdin (mesmo contrato de retorno).
@@ -125,13 +141,11 @@ fn interactive_menu(title: &str, options: &[String], initial: usize) -> Option<u
     use crossterm::execute;
     #[cfg(not(windows))]
     use crossterm::terminal::{Clear, ClearType};
-    
 
     let mut stdout = io::stdout();
     let mut selected = initial;
     let _ = execute!(stdout, Hide);
-    // Linhas por frame: 1 em branco + titulo + N opcoes + dica.
-    let frame_lines = (options.len() + 3) as u16;
+    let frame_lines = menu_frame_lines(options.len());
 
     loop {
         println!();
@@ -182,12 +196,21 @@ fn interactive_menu(title: &str, options: &[String], initial: usize) -> Option<u
             println!();
             return if cancelled { None } else { Some(selected) };
         }
-        // Reposiciona sem reler o cursor no Unix (DSR rouba bytes das
+        // Volta ao inicio do frame atual (paridade com `Show-SingleChoiceMenu`:
+        // `$top = CursorTop - frame`, travado em 0). No Unix segue o
+        // `Clear-Host` (ler o cursor la expoe DSR via stdin e rouba bytes das
         // setas/Enter); Win32 usa API de console real, sem race.
         #[cfg(windows)]
         {
-            let _ = execute!(stdout, MoveTo(0, 0));
-            let _ = frame_lines;
+            use crossterm::cursor::{MoveUp, position};
+            match position() {
+                Ok((_, row)) => {
+                    let _ = execute!(stdout, MoveTo(0, menu_redraw_top(row, frame_lines)));
+                }
+                Err(_) => {
+                    let _ = execute!(stdout, MoveUp(frame_lines));
+                }
+            }
         }
         #[cfg(not(windows))]
         {
@@ -285,6 +308,27 @@ mod tests {
     #[test]
     fn no_tui_flag_disables() {
         assert!(!tui_available(true));
+    }
+
+    #[test]
+    fn frame_lines_counts_blank_title_options_hint() {
+        assert_eq!(menu_frame_lines(0), 3);
+        assert_eq!(menu_frame_lines(2), 5);
+    }
+
+    #[test]
+    fn redraw_top_is_relative_never_absolute_zero() {
+        // Regressao: o redesenho voltava ao topo absoluto do buffer
+        // (`MoveTo(0, 0)`), empilhando o frame sobre as linhas anteriores.
+        // Paridade com `$top = CursorTop - (N + 3)`: acompanha a linha atual.
+        assert_eq!(menu_redraw_top(20, 5), 15);
+        assert_eq!(menu_redraw_top(12, 5), 7);
+    }
+
+    #[test]
+    fn redraw_top_clamps_at_zero() {
+        assert_eq!(menu_redraw_top(3, 5), 0);
+        assert_eq!(menu_redraw_top(0, 5), 0);
     }
 
     #[test]
