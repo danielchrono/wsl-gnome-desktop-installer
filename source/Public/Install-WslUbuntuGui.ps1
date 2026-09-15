@@ -545,8 +545,17 @@ if (-not (Test-Path $mstscExe)) {
     Write-Host "  Baixando o cliente RDP oficial (mstsc)..." -ForegroundColor Yellow
     try {
       (New-Object Net.WebClient).DownloadFile($mstscUrl, $mstscSetup)
-      if ((Get-Item $mstscSetup).Length -lt 1MB) { Warn "Download do mstsc suspeito ($((Get-Item $mstscSetup).Length) bytes) - instale manual: $mstscUrl" }
+      # So executa se for Microsoft assinado (tamanho sozinho nao prova nada:
+      # o fwlink pode entregar stub pequeno legitimo ou pagina de erro).
+      $mstscSigOk = $false
+      try {
+        $mstscSig = Get-AuthenticodeSignature $mstscSetup -ErrorAction Stop
+        $mstscSigOk = ($mstscSig.Status -eq 'Valid') -and ($mstscSig.SignerCertificate.Subject -match 'Microsoft Corporation')
+      } catch { $mstscSigOk = $false }
+      $mstscSize = (Get-Item $mstscSetup).Length
+      if (-not $mstscSigOk -and $mstscSize -lt 1MB) { Warn "Download do mstsc suspeito ($mstscSize bytes, sem assinatura Microsoft) - instale manual: $mstscUrl" }
       else {
+        if (-not $mstscSigOk) { Warn "Setup do mstsc sem assinatura verificavel ($mstscSize bytes) - tentando mesmo assim" }
         $mstscProc = Start-Process -FilePath $mstscSetup -Wait -PassThru
         if (-not (Test-Path $mstscExe)) { Start-Sleep -Seconds 15 }
         if (Test-Path $mstscExe) { Ok "Cliente RDP (mstsc) restaurado"; Remove-Item $mstscSetup -Force -ErrorAction SilentlyContinue }
