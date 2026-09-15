@@ -94,6 +94,8 @@ check('cert sem unroll de bytes no construtor', '(,$tlsBytes)' in src)
 check('mstsc: tamanho e exit code diagnosticados', 'Download do mstsc suspeito' in src and 'ExitCode' in src)
 check('mstsc reinstalado sozinho quando ausente', 'linkid=2247659' in src and 'Cliente RDP (mstsc) restaurado' in src)
 check('auto-elevacao com UAC (sem bypass)', '-Verb RunAs' in src and 'Auto-elevacao' in src and 'Unattended nunca relanca' in src)
+check('build carimbado (id deterministico)', '__BUILD_ID__' not in src and '$SCRIPT_BUILD' in src)
+check('build id e hex de 12', re.search(r'\$SCRIPT_BUILD = "[0-9a-f]{12}"', src) is not None)
 check('limpa retomada no sucesso', 'Clear-ResumeState' in src)
 check('versao 0.1.0', 'SCRIPT_VERSION' in src and '"0.1.0"' in src)
 tracked = []

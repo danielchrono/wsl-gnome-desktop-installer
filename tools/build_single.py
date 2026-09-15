@@ -6,6 +6,7 @@ NUNCA edite o .cmd a mao - edite source/ e rode:
     python3 tools/build_single.py --check      # so confere se esta em dia (p/ CI)
     python3 tests/test-install-ubuntu-gui.py   # regressao
 """
+import hashlib
 import io
 import os
 import shutil
@@ -59,7 +60,11 @@ def build_body():
             raise SystemExit('fonte sem newline final: source/' + name)
         parts.append(text)
     parts.append(read(ENTRY_TAIL))
-    return ''.join(parts)
+    body = ''.join(parts)
+    # Carimbo deterministico: identifica o build na primeira linha do run
+    # (mesmo conteudo = mesmo id; --check segue estavel).
+    digest = hashlib.sha1(body.encode('utf-8')).hexdigest()[:12]
+    return body.replace('__BUILD_ID__', digest)
 
 
 def build_cmd():

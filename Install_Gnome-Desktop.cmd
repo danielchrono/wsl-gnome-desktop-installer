@@ -30,6 +30,9 @@ if (-not $Unattended) {
     } catch { Write-Host "  Sem elevacao: segue sem admin (algumas etapas avisam e pulam)..." -ForegroundColor Yellow }
   }
 }
+
+$SCRIPT_BUILD = "1ef987f7ee90"
+Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
 # Install-WslUbuntuGui mapeia para locais curtas ($RDP_PORT, $MinBuild, ...);
 # Private/* leem via $script:UbuntuGuiDefaults (vale no modulo e no .cmd).

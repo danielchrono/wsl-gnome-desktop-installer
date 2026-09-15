@@ -20,3 +20,6 @@ if (-not $Unattended) {
     } catch { Write-Host "  Sem elevacao: segue sem admin (algumas etapas avisam e pulam)..." -ForegroundColor Yellow }
   }
 }
+
+$SCRIPT_BUILD = "__BUILD_ID__"
+Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
