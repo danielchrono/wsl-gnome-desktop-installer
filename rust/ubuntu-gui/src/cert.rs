@@ -3,7 +3,8 @@
 //!
 //! Idempotente via script find-or-create ([`publisher_cert_script`]) que usa
 //! a mesma primitiva do PS (`New-SelfSignedCertificate`, reaproveita de
-//! `CurrentUser\My` por `Subject -eq`, grava em `My` + `TrustedPublishers`)
+//! `CurrentUser\My` por `Subject -eq`, grava em `My` + `TrustedPublisher`)
+//! (singular: o plural abre um custom que o mstsc ignora).
 //! e devolve o thumbprint pelo marcador ([`parse_thumbprint_output`]).
 //! O `generate_self_signed` (rcgen) fica como item testavel no Linux da
 //! matriz; nao e usado no Windows (rcgen gera ECDSA sem chave persistida,
@@ -72,7 +73,7 @@ pub fn generate_self_signed(subject: &str, years: u32) -> Result<GeneratedCert, 
 }
 
 /// Garante o certificado de publicador (Windows): reaproveita de `My` por
-/// Subject ou gera + grava em `My` e `TrustedPublishers`. Retorna o
+/// Subject ou gera + grava em `My` e `TrustedPublisher`. Retorna o
 /// thumbprint (SHA-1 hex maiusculo, como `$pubCert.Thumbprint`).
 ///
 /// Delega a criacao ao `New-SelfSignedCertificate` (a mesma primitiva do
@@ -124,13 +125,13 @@ pub fn ensure_publisher_certificate(subject: &str, years: u32) -> Result<String,
 
 /// Script find-or-create do publicador (mesma primitiva do PS legado, numa
 /// unica chamada): reaproveita de `My` por Subject exato **com chave
-/// privada** ou cria CodeSigning autoassinado em `My` + `TrustedPublishers`.
+/// privada** ou cria CodeSigning autoassinado em `My` + `TrustedPublisher`.
 /// O `HasPrivateKey` descarta o cert sem chave que o caminho antigo (DER
 /// sem chave) deixou no store — sem ele o `rdpsign` seguiria falhando.
 /// Imprime `UBUNTUGUI_THUMBPRINT=<40 hex>`; sem CRLF (vai no argv).
 pub fn publisher_cert_script(subject: &str, years: u32) -> String {
     format!(
-        "$c = Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -eq '{subject}' -and $_.HasPrivateKey }} | Select-Object -First 1; if (-not $c) {{ $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddYears({years}); $s = New-Object Security.Cryptography.X509Certificates.X509Store('TrustedPublishers','CurrentUser'); $s.Open('ReadWrite'); $s.Add($c); $s.Close() }}; 'UBUNTUGUI_THUMBPRINT=' + $c.Thumbprint"
+        "$c = Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -eq '{subject}' -and $_.HasPrivateKey }} | Select-Object -First 1; if (-not $c) {{ $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddYears({years}); $s = New-Object Security.Cryptography.X509Certificates.X509Store('TrustedPublisher','CurrentUser'); $s.Open('ReadWrite'); $s.Add($c); $s.Close() }}; 'UBUNTUGUI_THUMBPRINT=' + $c.Thumbprint"
     )
 }
 
@@ -259,6 +260,9 @@ mod tests {
         assert!(s.contains("AddYears(10)"));
         assert!(s.contains("New-SelfSignedCertificate -Type CodeSigningCert"));
         assert!(s.contains("UBUNTUGUI_THUMBPRINT="));
+        // Store real (singular): o plural abre um custom que o mstsc ignora.
+        assert!(s.contains("'TrustedPublisher'"));
+        assert!(!s.contains("TrustedPublishers"));
         assert!(!s.contains('\r'), "CRLF quebraria o argv do powershell");
     }
 

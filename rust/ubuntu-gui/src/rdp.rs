@@ -95,6 +95,19 @@ pub fn protect_password_hex(_linux_pass: &str) -> Result<String, InstallError> {
     Err(InstallError::NotSupportedOnLinux("DPAPI CryptProtectData"))
 }
 
+/// O `.rdp` tem assinatura apos o `rdpsign`? Casa `signature:s:` nos bytes
+/// com ou sem NULs: o `rdpsign` reescreve o arquivo em UTF-16LE e a busca
+/// textual direta nao casa (`s\0i\0g\0...`) — checar so exit code 0 + texto
+/// UTF-8 dizia "falhou" com o arquivo assinado.
+pub fn rdp_has_signature(bytes: &[u8]) -> bool {
+    let needle = b"signature:s:";
+    if bytes.windows(needle.len()).any(|w| w == needle) {
+        return true;
+    }
+    let filtered: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+    filtered.windows(needle.len()).any(|w| w == needle)
+}
+
 /// Assina o `.rdp` com `rdpsign.exe /sha256` (warn-only se falhar, como no
 /// PowerShell: o aviso de fornecedor pode continuar, nao e fatal).
 #[cfg(windows)]
@@ -107,8 +120,8 @@ pub fn sign_rdp_file(rdp_path: &std::path::Path, thumbprint: &str) -> bool {
         .args(["/sha256", thumbprint, &rdp_path.to_string_lossy()])
         .status();
     match status {
-        Ok(s) if s.success() => std::fs::read_to_string(rdp_path)
-            .map(|t| t.contains("signature:s:"))
+        Ok(s) if s.success() => std::fs::read(rdp_path)
+            .map(|b| rdp_has_signature(&b))
             .unwrap_or(false),
         _ => false,
     }
@@ -185,6 +198,20 @@ mod tests {
     #[test]
     fn hex_is_lowercase_per_byte() {
         assert_eq!(blob_to_hex(&[0x0A, 0xBB, 0x00, 0xFF]), "0abb00ff");
+    }
+
+    #[test]
+    fn signature_found_in_utf8_and_utf16le() {
+        // UTF-8 direto (como gravamos).
+        assert!(rdp_has_signature(b"full address:s:x\nsignature:s:AQAB\n"));
+        // UTF-16LE (como o rdpsign reescreve): ASCII intercalado com NUL.
+        let wide: Vec<u8> = "signature:s:AQAB"
+            .bytes()
+            .flat_map(|b| [b, 0])
+            .collect();
+        assert!(rdp_has_signature(&wide));
+        assert!(!rdp_has_signature(b"full address:s:x\n"));
+        assert!(!rdp_has_signature(&[]));
     }
 
     #[cfg(not(windows))]

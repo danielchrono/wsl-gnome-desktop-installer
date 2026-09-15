@@ -31,6 +31,7 @@ FUNC_FILES = [
     os.path.join('Private', 'Get-WslIpAddress.ps1'),
     os.path.join('Private', 'Test-WslServiceHealth.ps1'),
     os.path.join('Private', 'Test-InstallInput.ps1'),
+    os.path.join('Private', 'Test-ValidIco.ps1'),
     os.path.join('Private', 'Show-TuiMenu.ps1'),
     os.path.join('Private', 'New-RdpFileContent.ps1'),
     os.path.join('Private', 'New-LauncherContent.ps1'),

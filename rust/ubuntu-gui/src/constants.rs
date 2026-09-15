@@ -11,10 +11,12 @@ pub struct UbuntuGuiDefaults {
     pub distro: String,
     pub gui_package: String,
     pub fallback_resolution: String,
-    /// Porta RDP preferida (padrao: 3389, porta oficial do Windows RDP).
+    /// Porta RDP padrao (3390, longe da 3389: a 3389 no loopback e
+    /// interceptada pelo RDP do host e a conexao cai com 0x708 — o probe de
+    /// "porta ocupada" nao detecta isso, entao 3389 nunca e default).
     pub rdp_port: u16,
     /// Porta alternativa usada automaticamente quando `rdp_port` esta ocupada.
-    /// SSOT: elimina o magic number 3390 espalhado no codigo (FP: sem literal
+    /// SSOT: elimina magic numbers espalhados no codigo (FP: sem literal
     /// duplicado; ViewModel decide a politica, orquestrador apenas chama).
     pub rdp_fallback_port: u16,
     pub app_name: String,
@@ -53,9 +55,9 @@ pub fn defaults() -> UbuntuGuiDefaults {
         distro: "Ubuntu".to_string(),
         gui_package: "ubuntu-desktop-minimal".to_string(),
         fallback_resolution: "1600x900".to_string(),
-        // Porta oficial do Windows RDP; fallback para 3390 se ocupada (net::choose_rdp_port).
-        rdp_port: 3389,
-        rdp_fallback_port: 3390,
+        // Longe da 3389 (0x708 no loopback); fallback para 3391 se ocupada.
+        rdp_port: 3390,
+        rdp_fallback_port: 3391,
         app_name: "Ubuntu-GUI".to_string(),
         icon_url: "https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512".to_string(),
         // Win11 22H2+: mirrored networking.
@@ -100,8 +102,9 @@ mod tests {
     #[test]
     fn rdp_port_defaults_with_fallback() {
         let d = defaults();
-        assert_eq!(d.rdp_port, 3389);
-        assert_eq!(d.rdp_fallback_port, 3390);
+        // 3390: longe da 3389 do host (0x708 no loopback).
+        assert_eq!(d.rdp_port, 3390);
+        assert_eq!(d.rdp_fallback_port, 3391);
         // Fallback deve ser diferente da porta preferida
         assert_ne!(d.rdp_port, d.rdp_fallback_port);
     }
@@ -134,7 +137,7 @@ mod tests {
     fn returns_clone_mutation_does_not_leak() {
         let mut a = defaults();
         a.rdp_port = 1;
-        assert_eq!(defaults().rdp_port, 3389);
+        assert_eq!(defaults().rdp_port, 3390);
     }
 
     #[test]

@@ -218,6 +218,25 @@ pub fn icon_sizes_arg(icon_sizes: &[u32]) -> String {
         .join(",")
 }
 
+/// Header `.ico` valido: reservado `00 00` + tipo `01 00` (icone) +
+/// count >= 1. Um `ubuntu.ico` corrompido (PNG renomeado, download falho,
+/// 0 bytes) passa no `exists()` e deixa o `.lnk` sem icone — por isso o
+/// passo 6 valida o conteudo, nao so a existencia.
+pub fn is_valid_ico_bytes(head: &[u8]) -> bool {
+    head.len() >= 6
+        && head[0] == 0
+        && head[1] == 0
+        && u16::from_le_bytes([head[2], head[3]]) == 1
+        && u16::from_le_bytes([head[4], head[5]]) >= 1
+}
+
+/// Valida o `.ico` no disco (ausente ou corrompido = refaz no passo 6).
+pub fn is_valid_ico_file(path: &std::path::Path) -> bool {
+    std::fs::read(path)
+        .map(|b| is_valid_ico_bytes(&b))
+        .unwrap_or(false)
+}
+
 /// `curl` do icone oficial + conversao multi-tamanho via PIL no WSL.
 pub fn icon_build_command(icon_url: &str, wsl_ico_path: &str, sizes_arg: &str) -> String {
     format!(
@@ -1122,7 +1141,8 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     let _ = std::fs::create_dir_all(&icons_dir);
     let _ = std::fs::create_dir_all(&prog_dir);
     let ico_path = icons_dir.join(ICON_FILE);
-    if !ico_path.exists() {
+    if !is_valid_ico_file(&ico_path) {
+        let _ = std::fs::remove_file(&ico_path);
         let w_ico = windows_path_to_wsl(&ico_path.to_string_lossy());
         let sizes = icon_sizes_arg(&d.icon_sizes);
         let r = wsl_cmd::invoke_wsl(
@@ -1130,7 +1150,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
             &linux_user,
             &icon_build_command(&d.icon_url, &w_ico, &sizes),
         )?;
-        if ico_path.exists() {
+        if is_valid_ico_file(&ico_path) {
             rep.ok("Icone Ubuntu baixado e convertido");
         } else {
             rep.warn(&format!(
@@ -1367,8 +1387,8 @@ fn wsl_write_stdin(
 pub fn desktop_dir() -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::FOLDERID_DESKTOP;
-        if let Some(p) = known_folder_path(&FOLDERID_DESKTOP as *const _) {
+        use windows::Win32::UI::Shell::FOLDERID_Desktop;
+        if let Some(p) = known_folder_path(&FOLDERID_Desktop as *const _) {
             return p;
         }
     }
@@ -1379,8 +1399,8 @@ pub fn desktop_dir() -> std::path::PathBuf {
 pub fn programs_menu_dir() -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::FOLDERID_PROGRAMS;
-        if let Some(p) = known_folder_path(&FOLDERID_PROGRAMS as *const _) {
+        use windows::Win32::UI::Shell::FOLDERID_Programs;
+        if let Some(p) = known_folder_path(&FOLDERID_Programs as *const _) {
             return p;
         }
     }
@@ -1673,6 +1693,19 @@ mod tests {
         assert!(check_output_matches("active", "^active$"));
         assert!(!check_output_matches("inactive", "^active$"));
         assert!(check_output_matches("xxOK", "OK"));
+    }
+
+    #[test]
+    fn ico_magic_accepts_real_header_rejects_garbage() {
+        // Header .ico minimo: 00 00 | 01 00 | count>=1.
+        assert!(is_valid_ico_bytes(&[0, 0, 1, 0, 1, 0]));
+        assert!(is_valid_ico_bytes(&[0, 0, 1, 0, 5, 0, 0xAA]));
+        // PNG renomeado, vazio, curto e count 0: refaz.
+        assert!(!is_valid_ico_bytes(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]));
+        assert!(!is_valid_ico_bytes(&[]));
+        assert!(!is_valid_ico_bytes(&[0, 0, 1, 0]));
+        assert!(!is_valid_ico_bytes(&[0, 0, 1, 0, 0, 0]));
+        assert!(!is_valid_ico_bytes(&[0, 0, 2, 0, 1, 0]));
     }
 
     #[test]

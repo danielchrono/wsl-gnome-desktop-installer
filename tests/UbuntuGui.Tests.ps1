@@ -162,6 +162,22 @@ Describe 'Test-MissingCollectionOutput' {
   }
 }
 
+Describe 'Test-ValidIco' {
+  It 'aceita header ico e rejeita lixo (fail-closed)' {
+    (& (Get-Module UbuntuGui) {
+      $d = Join-Path $env:TEMP ('ubuntugui-ico-' + [Guid]::NewGuid().ToString('N'))
+      New-Item -ItemType Directory -Path $d -Force | Out-Null
+      try {
+        $ok = Join-Path $d 'ok.ico'; $bad = Join-Path $d 'bad.ico'; $short = Join-Path $d 'short.ico'
+        [IO.File]::WriteAllBytes($ok, [byte[]](0,0,1,0,1,0))
+        [IO.File]::WriteAllBytes($bad, [byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A))
+        [IO.File]::WriteAllBytes($short, [byte[]](0,0,1,0))
+        @((Test-ValidIco -Path $ok), (Test-ValidIco -Path $bad), (Test-ValidIco -Path $short), (Test-ValidIco -Path (Join-Path $d 'falta.ico'))) -join ','
+      } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }) | Should Be 'True,False,False,False'
+  }
+}
+
 Describe 'New-WslSessionEnv' {
   It 'monta XDG e bus da sessao' {
     (& (Get-Module UbuntuGui) { New-WslSessionEnv -Uid '1000' }) | Should Be 'XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus'

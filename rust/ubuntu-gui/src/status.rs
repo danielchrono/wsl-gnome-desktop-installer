@@ -131,7 +131,7 @@ mod tests {
     fn uses_centralized_defaults() {
         let st = assemble_status(None, "daniel", None, "active", "OK", "YES");
         assert_eq!(st.distro, "Ubuntu");
-        assert_eq!(st.rdp_port, 3389);
+        assert_eq!(st.rdp_port, 3390);
         assert!(st.healthy());
     }
 
@@ -149,7 +149,7 @@ mod tests {
         let st = assemble_status(None, "daniel", None, "active", "OK", "YES");
         assert_eq!(
             st.summary(),
-            "daniel@Ubuntu rdp_port=3389 shell=up rdp=up cred=up"
+            "daniel@Ubuntu rdp_port=3390 shell=up rdp=up cred=up"
         );
     }
 }

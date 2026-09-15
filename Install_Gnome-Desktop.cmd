@@ -15,12 +15,6 @@ if errorlevel 1 (
 )
 exit /b 0
 :RUNPS1
-rem Check for Rust executable and delegate if present
-if exist "%~dp0ubuntu-gui.exe" (
-    echo Detected Rust installer, delegating to ubuntu-gui.exe
-    "%~dp0ubuntu-gui.exe" %*
-    goto :eof
-)
 powershell -NoProfile -Command "$a=':::PS1-BODY'+'-START'; $b=':::PS1-BODY'+'-END'; $t=[IO.File]::ReadAllText('%~f0') -split $a; $u=$t[1] -split $b; [IO.File]::WriteAllText('%TEMP%\Install-UbuntuGUI.ps1',$u[0].Trim() + [char]10)"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\Install-UbuntuGUI.ps1" %*
 echo.
@@ -51,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "d4a0abc03b52"
+$SCRIPT_BUILD = "ed02d9a81371"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -61,7 +55,7 @@ $script:UbuntuGuiDefaults = @{
   Distro               = 'Ubuntu'
   GuiPackage           = 'ubuntu-desktop-minimal'
   FallbackResolution   = '1600x900'
-  RdpPort              = 3390    # longe da 3389 (erro 0x708 no loopback)
+  RdpPort              = 3390    # longe da 3389 (erro 0x708 no loopback); ainda permite sobrescrita via parametro
   AppName              = 'Ubuntu-GUI'
   IconUrl              = 'https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512'
   MstscSetupUrl64      = 'https://go.microsoft.com/fwlink/?linkid=2247659'   # mstsc 64-bit (doc MS: desinstalavel desde 23H2)
@@ -496,6 +490,15 @@ function Test-PasswordConfirmation {
   if ([string]::IsNullOrEmpty($First)) { return $false }
   return ($First -ceq $Second)
 }
+# Valida o header do .ico (magic 00 00 01 00 + count >= 1): arquivo
+# corrompido (PNG renomeado, download falho, 0 bytes) passa no Test-Path
+# e deixa o .lnk sem imagem - o passo 6 refaz nesses casos.
+function Test-ValidIco([string]$Path) {
+  try {
+    $b = [IO.File]::ReadAllBytes($Path)
+    return ($b.Length -ge 6 -and $b[0] -eq 0 -and $b[1] -eq 0 -and ([BitConverter]::ToUInt16($b, 2) -eq 1) -and ([BitConverter]::ToUInt16($b, 4) -ge 1))
+  } catch { return $false }
+}
 # View TUI nativa (MVVM): so render + leitura de tecla, sem decisao de instalacao.
 # Zero dependencia (Windows PowerShell 5.1 inbox). Com fallback Read-Host quando
 # nao ha console interativo (pipe, -NoTui, hosts sem UI). Logica de indice pura
@@ -784,12 +787,14 @@ function Clear-ResumeState([string]$RunOncePath, [string]$RunOnceName, [string]$
 # Certificado de publicador p/ assinar o .rdp (some o aviso "fornecedor desconhecido").
 # Idempotente: reaproveita se ja existir no CurrentUser\My.
 function New-PublisherCertificate([string]$Subject = $script:UbuntuGuiDefaults.PublisherSubject) {
+  # So reaproveita com chave privada (cert sem chave nao assina: rdpsign 0x8009200B).
   $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
-    Where-Object { $_.Subject -eq $Subject } | Select-Object -First 1
+    Where-Object { $_.Subject -eq $Subject -and $_.HasPrivateKey } | Select-Object -First 1
   if ($cert) { return $cert }
   $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $Subject `
     -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears($script:UbuntuGuiDefaults.CertYears)
-  $store = New-Object Security.Cryptography.X509Certificates.X509Store("TrustedPublishers", "CurrentUser")
+  # Store real no singular (o plural abre um custom que o mstsc ignora).
+  $store = New-Object Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
   $store.Open("ReadWrite"); $store.Add($cert); $store.Close()
   Ok "Publicador confiavel criado"
   return $cert
@@ -867,6 +872,11 @@ $RebootDelaySec  = $D.RebootDelaySec
 $TlsDays         = $D.TlsCertDays
 $PublisherSubject = $D.PublisherSubject
 $ShellService    = $D.ShellService
+# Porta ocupada cai no fallback (nunca 3389: loopback dela e do host, 0x708).
+if (-not (Test-NetConnection -ComputerName '127.0.0.1' -Port $RDP_PORT -InformationLevel Quiet)) {
+    Warn "Porta $RDP_PORT indisponivel; usando porta alternativa 3391"
+    $RDP_PORT = 3391
+}
 $ShellBinary     = $D.ShellBinary
 $ShellRestartSec = $D.ShellRestartSec
 $RdpService      = $D.RdpService
@@ -1401,8 +1411,10 @@ if (-not (Test-Path $mstscExe)) {
 foreach ($d in @($IconsDir, $ProgDir)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
-# Icone oficial (Circle of Friends 2022) -> .ico multi-tamanho via PIL no WSL
-if (-not (Test-Path $IcoPath)) {
+# Icone oficial (Circle of Friends 2022) -> .ico multi-tamanho via PIL no WSL.
+# Valida o header, nao so a existencia (corrompido = refaz, senao o .lnk fica sem imagem).
+if (-not (Test-ValidIco -Path $IcoPath)) {
+  if (Test-Path $IcoPath) { Remove-Item $IcoPath -Force -ErrorAction SilentlyContinue }
   # C:\... -> /mnt/c/... (sintaxe compativel com Windows PowerShell 5.1)
   $wIco = '/mnt/' + $IcoPath.Substring(0, 1).ToLower() + ($IcoPath.Substring(2) -replace '\\', '/')
   $iconSizesArg = ($IconSizes | ForEach-Object { "($_, $_)" }) -join ', '
@@ -1420,7 +1432,7 @@ sq.save(sys.argv[1], sizes=[SIZES_ARG])
 '@
   $pyB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($pyTemplate -replace 'SIZES_ARG', $iconSizesArg)))
   $r = Invoke-Wsl $LinuxUser "curl -sSL --retry 2 --retry-delay 5 --retry-all-errors --show-error --max-time 60 -o /tmp/cof.png '$ICON_URL' && echo '$pyB64' | base64 -d > /tmp/mkico.py && python3 /tmp/mkico.py '$wIco'"
-  if (Test-Path $IcoPath) { Ok "Icone Ubuntu baixado e convertido" }
+  if (Test-ValidIco -Path $IcoPath) { Ok "Icone Ubuntu baixado e convertido" }
   else { Warn "Icone oficial falhou, usando o do mstsc ($($r.Out))" }
 } else { Ok "Icone ja existia" }
 
@@ -1482,7 +1494,14 @@ if ($rdpSign -and (Test-Path $rdpSign)) {
 } else {
   Warn "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)"
 }
-if ([IO.File]::ReadAllText($RdpPath) -match 'signature:s:') { Ok "RDP assinado (sem aviso de fornecedor)" }
+# O rdpsign reescreve o .rdp em UTF-16LE: casa nos dois encodings (so UTF-8
+# dizia "falhou" com o arquivo assinado).
+$rdpSigned = $false
+try {
+  $rdpBytes = [IO.File]::ReadAllBytes($RdpPath)
+  $rdpSigned = ([Text.Encoding]::UTF8.GetString($rdpBytes) -match 'signature:s:') -or ([Text.Encoding]::Unicode.GetString($rdpBytes) -match 'signature:s:')
+} catch { $rdpSigned = $false }
+if ($rdpSigned) { Ok "RDP assinado (sem aviso de fornecedor)" }
 else { Warn "Assinatura do .rdp falhou - o aviso de fornecedor pode continuar" }
 
 # Acesso Controlado a Pastas (Defender) pode bloquear a gravacao no Desktop:

@@ -5,7 +5,7 @@ $script:UbuntuGuiDefaults = @{
   Distro               = 'Ubuntu'
   GuiPackage           = 'ubuntu-desktop-minimal'
   FallbackResolution   = '1600x900'
-  RdpPort              = 3389    # padrão RDP do Windows, ainda permite sobrescrita via parâmetro
+  RdpPort              = 3390    # longe da 3389 (erro 0x708 no loopback); ainda permite sobrescrita via parametro
   AppName              = 'Ubuntu-GUI'
   IconUrl              = 'https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512'
   MstscSetupUrl64      = 'https://go.microsoft.com/fwlink/?linkid=2247659'   # mstsc 64-bit (doc MS: desinstalavel desde 23H2)

@@ -71,10 +71,10 @@ $RebootDelaySec  = $D.RebootDelaySec
 $TlsDays         = $D.TlsCertDays
 $PublisherSubject = $D.PublisherSubject
 $ShellService    = $D.ShellService
-# Verifica se a porta RDP escolhida está livre; se não, usa 3390 como fallback
+# Porta ocupada cai no fallback (nunca 3389: loopback dela e do host, 0x708).
 if (-not (Test-NetConnection -ComputerName '127.0.0.1' -Port $RDP_PORT -InformationLevel Quiet)) {
-    Warn "Porta $RDP_PORT indisponível; usando porta alternativa 3390"
-    $RDP_PORT = 3390
+    Warn "Porta $RDP_PORT indisponivel; usando porta alternativa 3391"
+    $RDP_PORT = 3391
 }
 $ShellBinary     = $D.ShellBinary
 $ShellRestartSec = $D.ShellRestartSec
@@ -610,8 +610,10 @@ if (-not (Test-Path $mstscExe)) {
 foreach ($d in @($IconsDir, $ProgDir)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
-# Icone oficial (Circle of Friends 2022) -> .ico multi-tamanho via PIL no WSL
-if (-not (Test-Path $IcoPath)) {
+# Icone oficial (Circle of Friends 2022) -> .ico multi-tamanho via PIL no WSL.
+# Valida o header, nao so a existencia (corrompido = refaz, senao o .lnk fica sem imagem).
+if (-not (Test-ValidIco -Path $IcoPath)) {
+  if (Test-Path $IcoPath) { Remove-Item $IcoPath -Force -ErrorAction SilentlyContinue }
   # C:\... -> /mnt/c/... (sintaxe compativel com Windows PowerShell 5.1)
   $wIco = '/mnt/' + $IcoPath.Substring(0, 1).ToLower() + ($IcoPath.Substring(2) -replace '\\', '/')
   $iconSizesArg = ($IconSizes | ForEach-Object { "($_, $_)" }) -join ', '
@@ -629,7 +631,7 @@ sq.save(sys.argv[1], sizes=[SIZES_ARG])
 '@
   $pyB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($pyTemplate -replace 'SIZES_ARG', $iconSizesArg)))
   $r = Invoke-Wsl $LinuxUser "curl -sSL --retry 2 --retry-delay 5 --retry-all-errors --show-error --max-time 60 -o /tmp/cof.png '$ICON_URL' && echo '$pyB64' | base64 -d > /tmp/mkico.py && python3 /tmp/mkico.py '$wIco'"
-  if (Test-Path $IcoPath) { Ok "Icone Ubuntu baixado e convertido" }
+  if (Test-ValidIco -Path $IcoPath) { Ok "Icone Ubuntu baixado e convertido" }
   else { Warn "Icone oficial falhou, usando o do mstsc ($($r.Out))" }
 } else { Ok "Icone ja existia" }
 
@@ -691,7 +693,14 @@ if ($rdpSign -and (Test-Path $rdpSign)) {
 } else {
   Warn "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)"
 }
-if ([IO.File]::ReadAllText($RdpPath) -match 'signature:s:') { Ok "RDP assinado (sem aviso de fornecedor)" }
+# O rdpsign reescreve o .rdp em UTF-16LE: casa nos dois encodings (so UTF-8
+# dizia "falhou" com o arquivo assinado).
+$rdpSigned = $false
+try {
+  $rdpBytes = [IO.File]::ReadAllBytes($RdpPath)
+  $rdpSigned = ([Text.Encoding]::UTF8.GetString($rdpBytes) -match 'signature:s:') -or ([Text.Encoding]::Unicode.GetString($rdpBytes) -match 'signature:s:')
+} catch { $rdpSigned = $false }
+if ($rdpSigned) { Ok "RDP assinado (sem aviso de fornecedor)" }
 else { Warn "Assinatura do .rdp falhou - o aviso de fornecedor pode continuar" }
 
 # Acesso Controlado a Pastas (Defender) pode bloquear a gravacao no Desktop:
