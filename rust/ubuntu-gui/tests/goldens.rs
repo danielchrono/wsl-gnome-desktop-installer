@@ -15,6 +15,7 @@ fn rdp_line_order_golden() {
     let order = [
         "screen mode id:i:1",
         "session bpp:i:32",
+        "smart sizing:i:1",
         "dynamic resolution:i:1",
         "usbdevicestoredirect:s:*",
         "desktopwidth:i:1600",

@@ -22,6 +22,9 @@ pub fn new_rdp_file_content(
         // 1 = janela (2 = tela cheia); paridade com o PS — maximizar continua possivel.
         "screen mode id:i:1".to_string(),
         "session bpp:i:32".to_string(),
+        // Zoom para caber na janela (sem scroll); com a sessao no tamanho da
+        // area util, o maximizado fica 1:1 sem blur.
+        "smart sizing:i:1".to_string(),
         // dynamic resolution: chave exploratoria (ignorada por mstsc desconhecido);
         // o beneficio real e a remocao do smart sizing, que bloqueava o redimensionamento
         // dinamico do xrdp — sem ele o servidor ja acompanha a janela por padrao.
@@ -173,8 +176,8 @@ mod tests {
         // NLA mantida (enablecredsspsupport e negotiate security layer).
         assert!(rdp.iter().any(|l| l.starts_with("enablecredsspsupport")));
         assert!(rdp.iter().any(|l| l.starts_with("negotiate security layer")));
-        // smart sizing removido.
-        assert!(!rdp.iter().any(|l| l.starts_with("smart sizing")));
+        // Zoom sem scroll (com a sessao na area util, o maximizado fica 1:1).
+        assert!(rdp.contains(&"smart sizing:i:1".to_string()));
         assert!(rdp.contains(&"dynamic resolution:i:1".to_string()));
     }
 
@@ -190,6 +193,7 @@ mod tests {
             vec![
                 "screen mode id:i:1",
                 "session bpp:i:32",
+                "smart sizing:i:1",
                 "dynamic resolution:i:1",
                 "usbdevicestoredirect:s:*",
                 "desktopwidth:i:1600",

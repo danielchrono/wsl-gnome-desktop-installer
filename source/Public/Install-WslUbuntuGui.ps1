@@ -125,11 +125,12 @@ if (-not (Test-Connection -ComputerName "archive.ubuntu.com" -Count 1 -Quiet)) {
   Warn "Sem resposta de archive.ubuntu.com - a instalacao APT pode falhar"
 } else { Ok "Rede alcanca o repositorio Ubuntu" }
 
-# Resolucao real do monitor primario ( cai para $FALLBACK_RES se falhar )
+# Area util do primario (tela menos barra de tarefas; cai para $FALLBACK_RES se falhar):
+# a sessao abre no tamanho que a janela maximizada realmente tem.
 $RES = $FALLBACK_RES
 try {
   Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-  $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  $b = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
   $cand = "$($b.Width)x$($b.Height)"
   if ($cand -match '^\d+x\d+$') { $RES = $cand; Ok "Resolucao do monitor: $RES" }
   else { Warn "Resolucao ilegivel, usando $RES" }

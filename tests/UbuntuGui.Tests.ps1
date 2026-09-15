@@ -83,6 +83,9 @@ Describe 'New-RdpFileContent' {
     ($rdp -contains 'enablecredsspsupport:i:1') | Should Be $true
     ($rdp -contains 'negotiate security layer:i:1') | Should Be $true
   }
+  It 'zoom sem scroll (smart sizing)' {
+    ($rdp -contains 'smart sizing:i:1') | Should Be $true
+  }
 }
 
 Describe 'New-CredHelperContent' {
@@ -98,6 +101,16 @@ Describe 'New-CredHelperContent' {
   It 'sidecar -Cred.txt gravado na instalacao' {
     $src = & (Get-Module UbuntuGui) { (Get-Command Install-WslUbuntuGui).ScriptBlock.ToString() }
     $src | Should Match '\$APP_NAME-Cred\.txt'
+  }
+}
+
+Describe 'Area util do primario' {
+  It 'cabe na tela (premissa do dimensionamento)' {
+    Add-Type -AssemblyName System.Windows.Forms
+    $s = [System.Windows.Forms.Screen]::PrimaryScreen
+    ($s.WorkingArea.Width -le $s.Bounds.Width) | Should Be $true
+    ($s.WorkingArea.Height -le $s.Bounds.Height) | Should Be $true
+    ($s.WorkingArea.Width -gt 0 -and $s.WorkingArea.Height -gt 0) | Should Be $true
   }
 }
 

@@ -1430,19 +1430,39 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     fn unreachable_marker() {}
 }
 
-/// Resolucao do monitor primario (Windows; `None` = usar fallback).
+/// Converte o retangulo da area util em (largura, altura), sem underflow.
+fn work_area_to_size(left: i32, top: i32, right: i32, bottom: i32) -> Option<(u32, u32)> {
+    let w = right.saturating_sub(left);
+    let h = bottom.saturating_sub(top);
+    if w > 0 && h > 0 {
+        Some((w as u32, h as u32))
+    } else {
+        None
+    }
+}
+
+/// Area util do monitor primario (tela menos barra de tarefas): a sessao abre
+/// no tamanho que a janela maximizada realmente tem — sem scroll nem tarja.
+/// (Windows; `None` = usar fallback.)
 #[cfg(windows)]
 fn primary_monitor_resolution() -> Option<(u32, u32)> {
-    // Via GetSystemMetrics (sem WinForms): SM_CXSCREEN=0, SM_CYSCREEN=1.
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    // Via SystemParametersInfoW SPI_GETWORKAREA (sem WinForms).
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
     unsafe {
-        let w = GetSystemMetrics(SM_CXSCREEN);
-        let h = GetSystemMetrics(SM_CYSCREEN);
-        if w > 0 && h > 0 {
-            Some((w as u32, h as u32))
-        } else {
-            None
+        let mut rect = RECT::default();
+        let ok = SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut rect as *mut RECT as *mut std::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        if ok.is_ok() {
+            return work_area_to_size(rect.left, rect.top, rect.right, rect.bottom);
         }
+        None
     }
 }
 
@@ -1643,6 +1663,15 @@ mod tests {
         assert!(!is_valid_resolution("abc"));
         assert!(!is_valid_resolution("1600x"));
         assert!(!is_valid_resolution("1600"));
+    }
+
+    #[test]
+    fn work_area_sizes_without_underflow() {
+        // Area util tipica (tela menos barra de tarefas).
+        assert_eq!(work_area_to_size(0, 0, 1600, 852), Some((1600, 852)));
+        assert_eq!(work_area_to_size(0, 0, 0, 0), None);
+        // Retangulo invertido nao estoura para u32 gigante.
+        assert_eq!(work_area_to_size(100, 100, 50, 50), None);
     }
 
     #[test]
