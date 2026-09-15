@@ -35,6 +35,22 @@ pub fn is_valid_resolution(res: &str) -> bool {
     }
 }
 
+/// Fail-fast do `--unattended` (puro): sem terminal, sem pergunta - tudo
+/// tem que vir de flags (`--linux-user` e `--linux-password`; rede cai no
+/// padrao localhost salvo `--net-choice`).
+pub fn check_unattended_credentials(
+    user: Option<&str>,
+    password: Option<&str>,
+) -> Result<(), InstallError> {
+    match (user, password) {
+        (Some(u), Some(p)) if !u.trim().is_empty() && !p.is_empty() => Ok(()),
+        _ => Err(InstallError::Dynamic(
+            "--unattended exige --linux-user e --linux-password (opcional: --net-choice 1|2)"
+                .to_string(),
+        )),
+    }
+}
+
 /// Resposta ao prompt de reboot (`[S/n]`, padrao sim): vazio ou comeca com `s`.
 pub fn wants_reboot_now(answer: &str) -> bool {
     answer.trim().is_empty() || answer.trim().to_lowercase().starts_with('s')
@@ -324,6 +340,7 @@ pub struct InstallOptions {
     pub rdp_port: Option<u16>,
     pub app_name: Option<String>,
     pub no_tui: bool,
+    pub unattended: bool,
     pub transcript: Option<std::path::PathBuf>,
 }
 
@@ -419,7 +436,9 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         .unwrap_or(d.fallback_resolution.clone());
     let rdp_port = opts.rdp_port.unwrap_or(d.rdp_port);
     let app_name = opts.app_name.clone().unwrap_or(d.app_name.clone());
-    let no_tui = opts.no_tui;
+    // Nao assistido implica sem TUI (cinto + suspensorio: os prompts sao
+    // pulados por `opts.unattended` mesmo assim).
+    let no_tui = opts.no_tui || opts.unattended;
 
     let mut rep = Reporter::new(opts.transcript.as_deref());
     rep.say(&format!("Ubuntu-GUI Installer v{}", crate::SCRIPT_VERSION));
@@ -527,7 +546,16 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
 
     if !resumed {
         linux_user = opts.linux_user.clone().unwrap_or_default();
-        if linux_user.trim().is_empty() {
+        if opts.unattended {
+            // Sem terminal, sem pergunta: tudo vem de flags (rede cai no
+            // padrao abaixo); nome passa pela mesma validacao do interativo.
+            check_unattended_credentials(
+                opts.linux_user.as_deref(),
+                opts.linux_password.as_deref(),
+            )?;
+            net_choice = opts.net_choice.clone().unwrap_or_else(|| "1".to_string());
+            rep.ok(&format!("Usuario Linux: {linux_user} (nao assistido)"));
+        } else if linux_user.trim().is_empty() {
             let saved_raw = std::fs::read_to_string(&saved_user_file).unwrap_or_default();
             let win_user = std::env::var("USERNAME").unwrap_or_default();
             let def_user = input::default_linux_user(Some(&saved_raw), Some(&win_user));
@@ -599,7 +627,9 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         }
         rep.ok(&format!("Usuario Linux: {linux_user}"));
 
-        if opts.net_choice.as_ref().is_none_or(|s| s.trim().is_empty()) {
+        if net_choice.trim().is_empty()
+            && opts.net_choice.as_ref().is_none_or(|s| s.trim().is_empty())
+        {
             if tui::tui_available(no_tui) {
                 let idx = tui::show_single_choice_menu(
                     "Modo de rede",
@@ -622,7 +652,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
                 let _ = std::io::stdin().lock().read_line(&mut t);
                 net_choice = t.trim().to_string();
             }
-        } else {
+        } else if net_choice.trim().is_empty() {
             net_choice = opts.net_choice.clone().unwrap_or_default();
         }
         let resolved = input::resolve_network_choice(Some(&net_choice));
@@ -670,11 +700,17 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
             let exe = std::env::current_exe().unwrap_or(prog_dir.join("ubuntu-gui.exe"));
             resume::save_resume_files(&exe, &prog_dir, &state)?;
             rep.ok("Retomada agendada (reabre sozinho apos o reboot)");
-            print!("Reiniciar o Windows agora para continuar sozinho? [S/n]: ");
-            let _ = std::io::stdout().flush();
-            let mut rb = String::new();
-            let _ = std::io::stdin().lock().read_line(&mut rb);
-            if wants_reboot_now(&rb) {
+            let reboot_now = if opts.unattended {
+                rep.say("  Modo nao assistido: reiniciando sozinho para continuar...");
+                true
+            } else {
+                print!("Reiniciar o Windows agora para continuar sozinho? [S/n]: ");
+                let _ = std::io::stdout().flush();
+                let mut rb = String::new();
+                let _ = std::io::stdin().lock().read_line(&mut rb);
+                wants_reboot_now(&rb)
+            };
+            if reboot_now {
                 rep.say(&format!(
                     "  Reiniciando em {}s (cancele com: shutdown /a)...",
                     d.reboot_delay_sec
@@ -1496,6 +1532,15 @@ mod tests {
     #[test]
     fn password_retry_allows_three_attempts() {
         assert_eq!(PASSWORD_MAX_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn unattended_requires_user_and_password() {
+        assert!(check_unattended_credentials(Some("caiop"), Some("s3nha")).is_ok());
+        assert!(check_unattended_credentials(None, Some("s3nha")).is_err());
+        assert!(check_unattended_credentials(Some("caiop"), None).is_err());
+        assert!(check_unattended_credentials(Some("caiop"), Some("")).is_err());
+        assert!(check_unattended_credentials(Some("   "), Some("s3nha")).is_err());
     }
 
     #[test]

@@ -63,6 +63,11 @@ struct Cli {
     #[arg(long)]
     no_tui: bool,
 
+    /// Roda sem parar em nada: exige --linux-user e --linux-password, rede
+    /// cai no padrao (ou --net-choice), reboot sozinho quando preciso.
+    #[arg(long)]
+    unattended: bool,
+
     /// Arquivo de transcript (padrao: TEMP/Ubuntu-GUI-install.log).
     #[arg(long)]
     transcript: Option<PathBuf>,
@@ -139,6 +144,7 @@ fn main() {
         rdp_port: cli.rdp_port,
         app_name: cli.app_name,
         no_tui: cli.no_tui,
+        unattended: cli.unattended,
         transcript,
     };
 

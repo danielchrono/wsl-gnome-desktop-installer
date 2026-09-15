@@ -19,6 +19,15 @@ acessível via RDP (atalho no Desktop e no Iniciar, login automático).
 `ubuntu-gui.exe --help` lista as flags (`--linux-user`, `--linux-password`,
 `--resume <state.json>`, `--no-transcript`, ...).
 
+Totalmente sem paradas (captura tudo na 1a run, sem perguntar 2x):
+
+```bat
+ubuntu-gui.exe --unattended --linux-user caiop --linux-password SUA-SENHA
+```
+
+(opcional: `--net-choice 2` p/ IP dinâmico; reboot sozinho quando preciso,
+retoma sozinho depois; senha com 3 tentativas no modo interativo).
+
 ## O que ele faz (7 etapas, idempotente)
 
 1. Habilita o WSL, instala a distro e configura rede (mirrored ou dinâmica).
