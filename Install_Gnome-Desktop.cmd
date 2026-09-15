@@ -1215,6 +1215,20 @@ Invoke-Wsl $LinuxUser "grdctl rdp set-tls-cert $TlsCertPath 2>/dev/null; grdctl 
 Start-Sleep -Seconds $RdpSettleSec
 if (Test-WslRdpListening -LinuxUser $LinuxUser -Service $RdpService -Port $RDP_PORT) { Ok "RDP ouvindo na porta $RDP_PORT" }
 else { Fail "RDP nao subiu"; throw "RDP nao subiu" }
+# Confia no cert TLS autoassinado (gerado por nos p/ este endpoint): some o
+# aviso de rede/computador nao confiavel. So CurrentUser (sem admin).
+try {
+  $tlsPem = (Invoke-Wsl $LinuxUser "cat $TlsCertPath 2>/dev/null").Out
+  $tlsB64 = ($tlsPem -replace '-----(BEGIN|END) CERTIFICATE-----', '') -replace '\s', ''
+  $tlsCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2([Convert]::FromBase64String($tlsB64))
+  $tlsStore = New-Object Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
+  $tlsStore.Open('ReadWrite')
+  try {
+    $tlsKnown = @($tlsStore.Certificates | Where-Object { $_.Thumbprint -eq $tlsCert.Thumbprint }).Count -gt 0
+    if (-not $tlsKnown) { $tlsStore.Add($tlsCert); Ok "Cert TLS confiavel (sem aviso de rede nao confiavel)" }
+    else { Ok "Cert TLS ja confiavel" }
+  } finally { $tlsStore.Close() }
+} catch { Warn "Cert TLS nao importado (aviso de rede pode continuar): $($_.Exception.Message)" }
 
 # ============================== 6. ICONE + ATALHOS ==============================
 Step "6/7 Icone e atalhos ($APP_NAME)"
@@ -1294,6 +1308,30 @@ if (Test-Path $rdpSign) {
 if ([IO.File]::ReadAllText($RdpPath) -match 'signature:s:') { Ok "RDP assinado (sem aviso de fornecedor)" }
 else { Warn "Assinatura do .rdp falhou - o aviso de fornecedor pode continuar" }
 
+# Acesso Controlado a Pastas (Defender) pode bloquear a gravacao no Desktop:
+# detecta via escrita de prova e, com autorizacao, libera o powershell
+# (exige admin; sem permissao, orienta e segue - atalho nunca e fatal).
+$cfaMode = 0
+try { $cfaMode = (Get-MpPreference -ErrorAction Stop).EnableControlledFolderAccess } catch { $cfaMode = 0 }
+if ($cfaMode -eq 1) {
+  $cfaProbe = Join-Path (Split-Path $DeskLnk) ".ubuntugui-write-test"
+  $cfaWritable = $false
+  try { [IO.File]::WriteAllText($cfaProbe, "x"); Remove-Item $cfaProbe -Force; $cfaWritable = $true } catch { $cfaWritable = $false }
+  if (-not $cfaWritable) {
+    $cfaAllow = $false
+    if ($Unattended) { Warn "CFA bloqueando o Desktop (nao assistido: sem liberacao automatica)" }
+    else {
+      $cfaAns = Read-Host "Defender (pastas protegidas) bloqueando os atalhos. Liberar o PowerShell p/ gravar? [S/n]"
+      $cfaAllow = Test-RebootAnswer -Answer $cfaAns  # [S/n] padrao sim
+    }
+    if ($cfaAllow) {
+      try {
+        Add-MpPreference -ControlledFolderAccessAllowedApplications (Join-Path $PSHOME "powershell.exe") -ErrorAction Stop
+        Ok "PowerShell liberado nas pastas protegidas"
+      } catch { Warn "Sem permissao p/ liberar o CFA (rode como admin uma vez): $($_.Exception.Message)" }
+    }
+  }
+}
 # .lnk no Desktop + Iniciar, com o icone (fallback: icone do mstsc)
 $icoSpec = if (Test-Path $IcoPath) { "$IcoPath,0" } else { "C:\Windows\System32\mstsc.exe,0" }
 $ws = New-Object -ComObject WScript.Shell
@@ -1307,7 +1345,7 @@ foreach ($lnk in @($DeskLnk, $StartLnk)) {
   $s.Save()
 }
 if ((Test-Path $DeskLnk) -and (Test-Path $StartLnk)) { Ok "Atalhos no Desktop e no Iniciar" }
-else { Fail "Atalhos nao criados"; throw "Atalhos nao criados" }
+else { Warn "Atalhos incompletos (rode de novo p/ recriar) - o Ubuntu-GUI.cmd em $ProgDir funciona" }
 
 # ============================== 7. VERIFICACAO ==============================
 Step "7/7 Verificacao ponta a ponta"
