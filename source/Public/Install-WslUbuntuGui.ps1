@@ -16,7 +16,7 @@ function Install-WslUbuntuGui {
   3. Desabilita o GDM, configura o ambiente WSLg no .bashrc
   4. Le a resolucao do monitor Windows e cria o monitor virtual igual
   5. Sobe o GNOME headless + RDP com TLS e credencial no cofre
-  6. Baixa o icone oficial do Ubuntu, restaura o mstsc se ausente, cria o .cmd e os atalhos
+  6. Baixa o icone oficial do Ubuntu, restaura o mstsc se ausente (ou garante o FreeRDP reserva no WSL), cria o .cmd e os atalhos
 #>
 [CmdletBinding()]
 param(
@@ -96,7 +96,8 @@ $RunOnceName = "UbuntuGUIResume"
 Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 
 # ============================== PRE-CHECKS ==============================
-Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION" -ForegroundColor Cyan
+# Banner unico: no .cmd o entry-head ja imprimiu (com build id); aqui so no modulo.
+if (-not $script:UbuntuGuiBannerShown) { Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION" -ForegroundColor Cyan }
 Step "Pre-checagens (Windows, rede, WSL)"
 $os = [Environment]::OSVersion.Version
 if ($os.Major -lt 10 -or ($os.Major -eq 10 -and $os.Build -lt 19041)) {
@@ -577,6 +578,30 @@ if (-not (Test-Path $mstscExe)) {
     } catch { Warn "mstsc nao restaurado ($($_.Exception.Message)) - instale manual: $mstscUrl" }
   }
 }
+# Sem mstsc (ex.: Home sem o cliente e stub oficial recusou): reserva via
+# FreeRDP dentro do WSL - abre pela WSLg, nada a instalar no Windows.
+# O .rdp e reaproveitado (host/usuario/resolucao); a senha e pedida na
+# janela do FreeRDP, nunca em texto no .cmd. Nunca fatal.
+$FreeRdpBin = ''
+$WRdpPath = ''
+if (-not (Test-Path $mstscExe)) {
+  $fr = Invoke-Wsl $LinuxUser "command -v xfreerdp 2>/dev/null || command -v sdl-freerdp 2>/dev/null || echo MISSING"
+  if ("$($fr.Out)" -match 'MISSING') {
+    Write-Host '  Instalando cliente RDP reserva (FreeRDP)...' -ForegroundColor Yellow
+    Invoke-Wsl $LinuxUser "printf '%s\n' '$PWQ' | sudo -S $apt apt-get install -y freerdp3-x11 2>&1" | Out-Null
+    $fr = Invoke-Wsl $LinuxUser "command -v xfreerdp 2>/dev/null || command -v sdl-freerdp 2>/dev/null || echo MISSING"
+  }
+  if ("$($fr.Out)" -match 'MISSING') {
+    Invoke-Wsl $LinuxUser "printf '%s\n' '$PWQ' | sudo -S $apt apt-get install -y freerdp2-x11 2>&1" | Out-Null
+    $fr = Invoke-Wsl $LinuxUser "command -v xfreerdp 2>/dev/null || command -v sdl-freerdp 2>/dev/null || echo MISSING"
+  }
+  if ("$($fr.Out)".Trim() -match 'MISSING') { Warn 'Sem cliente RDP reserva (freerdp3/freerdp2 ausentes no apt) - siga sem mstsc por enquanto' }
+  else {
+    $FreeRdpBin = (("$($fr.Out)".Trim()) -split '\s+')[-1]
+    $WRdpPath = '/mnt/' + $ProgDir.Substring(0, 1).ToLower() + ($ProgDir.Substring(2) -replace '\\', '/') + "/$APP_NAME.rdp"
+    Ok "Cliente RDP reserva: $FreeRdpBin"
+  }
+}
 foreach ($d in @($IconsDir, $ProgDir)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
@@ -619,14 +644,22 @@ elseif ($UseMirrored) { Ok "RDP via IP dinamico por enquanto (localhost ainda na
 else { Ok "RDP via IP dinamico (cada clique detecta sozinho)" }
 $discBlock = if ($LocalhostLive) { 'rem IP fixo via mirrored networking (127.0.0.1)' }
   else { 'rem IP descoberto automaticamente a cada clique (hostname -I)' + "`r`n" + 'for /f "tokens=1" %%i in (''%WSL% -d %DISTRO% -- hostname -I 2^>nul'') do set WSL_IP=%%i' }
-# Fixo: nao reescreve o .rdp (assinatura continua valida). Dinamico: reescreve + reassina.
+# Fixo: nao reescreve o .rdp (assinatura continua valida). Dinamico: reescreve + reassina SO se o IP mudou (sem churn: o "nao perguntar de novo" do mstsc sobrevive entre cliques).
 $rewriteBlock = if ($LocalhostLive) { 'rem IP/porta fixos via mirrored (127.0.0.1:RDP_PORT_VAL) - .rdp assinado, nao alterar' }
-  else { 'powershell -NoProfile -Command "(Get-Content ''%RDPPATH%'') -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1"' }
+  else { 'for /f "tokens=3,4 delims=:" %%a in (''findstr /B "full address:s:" ''%RDPPATH%'' '') do set RDP_CUR=%%a:%%b' + "`r`n" + 'if not "%RDP_CUR%"=="%WSL_IP%:RDP_PORT_VAL" powershell -NoProfile -Command "$c = Get-Content ''%RDPPATH%''; if ($c -match ''^full address:s:'') { $c -replace ''^full address:s:.*'',''full address:s:%WSL_IP%:RDP_PORT_VAL'' | Set-Content ''%RDPPATH%''; if (Test-Path ''%SYS32%\rdpsign.exe'') { & %SYS32%\rdpsign.exe /sha256 THUMBPRINT_VAL ''%RDPPATH%'' >nul 2>&1 } }"' }
+$rdpW = 1600; $rdpH = 900
+if ($RES -match '^(\d+)x(\d+)$') { $rdpW = [int]$Matches[1]; $rdpH = [int]$Matches[2] }
 $cmd = New-LauncherContent -AppName $APP_NAME -Distro $DISTRO `
   -LinuxUser $LinuxUser -RdpPort $RDP_PORT -Thumbprint $pubCert.Thumbprint `
-  -DiscoveryBlock $discBlock -RewriteBlock $rewriteBlock
+  -DiscoveryBlock $discBlock -RewriteBlock $rewriteBlock `
+  -FreeRdpBin $FreeRdpBin -WRdpPath $WRdpPath -RdpWidth $rdpW -RdpHeight $rdpH
 [IO.File]::WriteAllText($CmdPath, $cmd)
 Ok "Script em $CmdPath"
+# Helper que grava a credencial no Cofre do Windows (login sem aviso de fornecedor).
+$CredHelperPath = Join-Path $ProgDir "$APP_NAME-Cred.ps1"
+[IO.File]::WriteAllText($CredHelperPath, (New-CredHelperContent))
+if (Test-Path $CredHelperPath) { Ok "Login sem aviso via Cofre do Windows" }
+else { Warn "Helper de credencial nao criado (segue pelo .rdp)" }
 
 # .rdp com login automatico: senha em blob DPAPI (so este usuario Windows le)
 $RdpPath = Join-Path $ProgDir "$APP_NAME.rdp"
@@ -643,9 +676,12 @@ else { Fail "Arquivo .rdp nao criado"; throw "RDP nao criado" }
 # Assina o .rdp p/ sumir o aviso "fornecedor desconhecido" (rerun reassina apos regerar).
 # rdpsign ausente (SKU sem o binario, ou powershell 32-bit vendo SysWOW64) nao
 # pode matar a instalacao: assinatura e cosmetica, o .rdp funciona sem ela.
-$rdpSign = "$env:SystemRoot\System32\rdpsign.exe"
-if ((-not [Environment]::Is64BitProcess) -and (Test-Path "$env:SystemRoot\Sysnative\rdpsign.exe")) { $rdpSign = "$env:SystemRoot\Sysnative\rdpsign.exe" }
-if (Test-Path $rdpSign) {
+# Resolve nos dois contextos (elevado ou nao, 32 ou 64-bit): o processo que
+# executa pode ver um System32 diferente (redirecionamento SysWOW64), entao
+# sonda as duas visoes sempre em vez de escolher por bitness.
+$rdpSign = @("$env:SystemRoot\System32\rdpsign.exe", "$env:SystemRoot\Sysnative\rdpsign.exe") |
+  Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($rdpSign -and (Test-Path $rdpSign)) {
   & $rdpSign /sha256 $pubCert.Thumbprint "$RdpPath" | Out-Null
 } else {
   Warn "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)"
