@@ -370,7 +370,7 @@ if ($busRepair.Repaired) { Warn "Bus do cofre reparado ($($busRepair.Detail))" }
 if (Start-WslKeyringDaemon -LinuxUser $LinuxUser -Uid $Uid) { Ok "Daemon do cofre no ar" } else { Warn "Daemon do cofre nao respondeu - PAM tenta subir sozinho" }
 # Cofre login via PAM do sudo (cria com a senha do usuario; revertido em seguida).
 # O tee recebe SENHA + CONTEUDO no mesmo stdin: o sudo consome a 1a linha, o resto anexa.
-$kc = New-WslLoginKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -KeyringPath $KeyringPath -PamSudoPath $PamSudoPath
+$kc = New-WslLoginKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid -KeyringPath $KeyringPath -PamSudoPath $PamSudoPath
 if ($kc.Fresh) { Ok "Cofre login criado com a senha informada" }
 elseif ($kc.Created) { Ok "Cofre login pronto" }
 else { Fail "Cofre nao criado (o PAM via sudo nao criou sozinho: confira ~/.local/share/keyrings/login.keyring e backups *.bak* - sem o arquivo nenhum unlock funciona)"; throw "Cofre nao criado" }
@@ -419,15 +419,19 @@ if ($uk.State -ne 'Unlocked') {
       Warn "Senha nao confere para o cofre existente (sudo passou mas cofre segue trancado; unlock por stdin nao valida nada aqui: senha falsa tambem sai 0) - recriando o cofre com a senha informada (backup automatico, original preservado)"
       $rk = Reset-WslLoginKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid -KeyringPath $KeyringPath -PamSudoPath $PamSudoPath
       if (-not $rk.Recreated) {
-        Fail "Recriacao via PAM falhou e o original foi restaurado de $($rk.Backup) ($lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo"
+        Fail "Recriacao via PAM falhou e o original foi restaurado de $($rk.Backup) ($lockDetail) - se o sudo barrou --preserve-env, o PAM nao enxergou o bus; senao, destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo"
         throw "Cofre bloqueado"
       }
       Ok "Cofre recriado com a senha informada (original em $($rk.Backup))"
-      $uk2 = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
-      if ($uk2.State -eq 'Unlocked') { Ok "Cofre destravou apos recriar" }
+      $ukS = Get-WslKeyringProbeState -LinuxUser $LinuxUser -Uid $Uid
+      if ($ukS.State -eq 'Unlocked') { Ok "Cofre destravado apos recriar (via PAM)" }
       else {
-        Fail "Cofre recriado mas segue trancado (retorno: $($uk2.Probe) - unlock disse: $($uk2.UnlockText)) - tente 'wsl --shutdown' e rode de novo"
-        throw "Cofre bloqueado"
+        $uk2 = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+        if ($uk2.State -eq 'Unlocked') { Ok "Cofre destravou apos recriar" }
+        else {
+          Fail "Cofre recriado mas segue trancado (sonda: $($ukS.Out) - unlock disse: $($uk2.UnlockText)) - tente 'wsl --shutdown' e rode de novo"
+          throw "Cofre bloqueado"
+        }
       }
     }
   }

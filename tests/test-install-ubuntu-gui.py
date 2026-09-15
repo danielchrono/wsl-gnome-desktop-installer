@@ -108,6 +108,7 @@ check('novos helpers no build', 'function ConvertFrom-SecureStringPlain' in src 
 check('sonda do cofre classifica Locked vs Error', 'function Get-WslKeyringProbeState' in src and "'Unlocked'" in src and "'Locked'" in src and "'Error'" in src)
 check('sonda distingue colecao ausente (Missing)', 'function Test-MissingCollectionOutput' in src and "'Missing'" in src and 'Cofre ausente' in install_src and 'nunca rm' in install_src)
 check('cofre recriado com backup quando senha nao confere', 'function Reset-WslLoginKeyring' in src and 'function New-WslLoginKeyring' in src and 'Cofre recriado' in install_src and 'Cofre destravou apos recriar' in install_src)
+check('PAM atravessa o sudo com o bus (preserve-env) + unlock via PAM', 'function Invoke-WslPamUnlock' in src and 'preserve-env' in src and 'export $busEnv' in src and 'via PAM' in install_src)
 check('falha do cofre mostra evidencia (unlock + sonda)', 'unlock disse:' in src and 'Sonda do cofre falhou' in src and 'Cofre destravou na re-sonda' in src)
 check('re-sonda limitada (sem retry cego)', 'KeyringReprobeSec' in src and 'Start-Sleep -Seconds $KeyringReprobeSec' in src)
 check('falha Locked traz detalhe (login/arquivos/daemons)', 'function Get-WslKeyringLockDetail' in src and 'collection/login' in src and "pgrep -fc '[g]nome-keyring-daemon'" in src and 'pgrep -c gnome-keyring-daemon' not in src)
