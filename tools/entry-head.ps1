@@ -2,10 +2,11 @@
 param([switch]$Resume, [switch]$Unattended)
 $SCRIPT_VERSION = "0.1.0"
 try { Start-Transcript -Path (Join-Path $env:TEMP 'Ubuntu-GUI-install.log') -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
-# Auto-elevacao: varios pontos exigem admin (WSL, mstsc, CFA). Relanca elevado
-# com UM clique no UAC - bypass silencioso nao existe (seria vulnerabilidade).
+# Auto-elevacao: varios pontos exigem admin (WSL, mstsc, CFA). Via .cmd, o lote
+# ja relancou elevado (caixa preta) - este bloco so age no uso direto do ps1
+# (ex.: retomada RunOnce), com UM clique no UAC - bypass silencioso nao existe.
 # -Unattended nunca relanca (ninguem clicaria no UAC: rode o .cmd ja elevado).
-if (-not $Unattended) {
+if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   $isAdminHead = $false
   try { $isAdminHead = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $isAdminHead = $false }
   if (-not $isAdminHead) {

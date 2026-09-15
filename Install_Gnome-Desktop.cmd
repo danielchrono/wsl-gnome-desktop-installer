@@ -2,6 +2,19 @@
 rem Instalador Ubuntu GUI em ARQUIVO UNICO: extrai o PowerShell embutido
 rem abaixo (texto claro, auditavel) para a pasta TEMP e executa.
 setlocal
+rem Auto-elevacao na caixa preta: sem admin, relanca ESTE .cmd elevado
+rem (1 clique no UAC; o ps1 embutido nao re-eleva - ve UBUNTUGUI_FROM_CMD).
+set UBUNTUGUI_FROM_CMD=1
+net session >nul 2>&1
+if not errorlevel 1 goto :RUNPS1
+echo Elevando a admin (confirme no UAC uma vez)...
+if "%~1"=="" (powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ErrorAction Stop } catch { exit 1 }") else (powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs -ErrorAction Stop } catch { exit 1 }")
+if errorlevel 1 (
+  echo Sem elevacao: segue sem admin (algumas etapas avisam e pulam)...
+  goto :RUNPS1
+)
+exit /b 0
+:RUNPS1
 powershell -NoProfile -Command "$a=':::PS1-BODY'+'-START'; $b=':::PS1-BODY'+'-END'; $t=[IO.File]::ReadAllText('%~f0') -split $a; $u=$t[1] -split $b; [IO.File]::WriteAllText('%TEMP%\Install-UbuntuGUI.ps1',$u[0].Trim() + [char]10)"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\Install-UbuntuGUI.ps1" %*
 echo.
@@ -12,10 +25,11 @@ exit /b 0
 param([switch]$Resume, [switch]$Unattended)
 $SCRIPT_VERSION = "0.1.0"
 try { Start-Transcript -Path (Join-Path $env:TEMP 'Ubuntu-GUI-install.log') -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
-# Auto-elevacao: varios pontos exigem admin (WSL, mstsc, CFA). Relanca elevado
-# com UM clique no UAC - bypass silencioso nao existe (seria vulnerabilidade).
+# Auto-elevacao: varios pontos exigem admin (WSL, mstsc, CFA). Via .cmd, o lote
+# ja relancou elevado (caixa preta) - este bloco so age no uso direto do ps1
+# (ex.: retomada RunOnce), com UM clique no UAC - bypass silencioso nao existe.
 # -Unattended nunca relanca (ninguem clicaria no UAC: rode o .cmd ja elevado).
-if (-not $Unattended) {
+if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   $isAdminHead = $false
   try { $isAdminHead = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $isAdminHead = $false }
   if (-not $isAdminHead) {
@@ -31,7 +45,7 @@ if (-not $Unattended) {
   }
 }
 
-$SCRIPT_BUILD = "de5034600718"
+$SCRIPT_BUILD = "53197676d3d8"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
 # Install-WslUbuntuGui mapeia para locais curtas ($RDP_PORT, $MinBuild, ...);
