@@ -25,6 +25,7 @@ $script:UbuntuGuiDefaults = @{
   MinBuildMirrored     = 22621   # Win11 22H2+: mirrored networking
   CredTimeoutSec       = 60      # timeout por tentativa de set-credentials
   CredRetries          = 2       # tentativas de gravacao no cofre
+  KeyringReprobeSec    = 5       # espera antes da re-sonda (corrida de ativacao do D-Bus)
   AptRetries           = 3       # tentativas de apt install
   RdpSettleSec         = 4       # espera pos-restart do RDP
   WslShutdownWaitSec   = 8       # espera pos wsl --shutdown
@@ -116,13 +117,55 @@ function New-WslSessionEnv([string]$Uid) {
   return "XDG_RUNTIME_DIR=/run/user/$Uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$Uid/bus"
 }
 
+# Pipeline de unlock (sem exit): printf|unlock|tail. O exit com PIPESTATUS vive
+# no chamador, p/ compor unlock+sonda na MESMA chamada WSL (daemon efemero:
+# unlock e sonda em chamadas separadas podem falar com instancias diferentes).
+function Get-WslUnlockPipeline([string]$PasswordQuote, [string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  return "printf '%s' '$PasswordQuote' | $envPrefix gnome-keyring-daemon --unlock 2>&1 | tail -n 3"
+}
+
+# Comando da sonda Locked (com 2>&1: o texto do erro e diagnostico, nao lixo).
+function Get-WslKeyringProbeCommand([string]$Uid) {
+  $envPrefix = New-WslSessionEnv -Uid $Uid
+  return "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked 2>&1"
+}
+
 # Desbloqueia o cofre 'login' com a senha informada. Retorna @{ Code; Out }.
 # Code != 0 = senha nao confere ou daemon fora: o chamador falha rapido com
 # instrucao (nunca retry cego que queima 2x60s). PIPESTATUS[1] e o exit do
 # unlock (sem ele, o tail mascarava tudo com 0).
 function Unlock-WslKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid) {
-  $envPrefix = New-WslSessionEnv -Uid $Uid
-  return Invoke-Wsl $LinuxUser "printf '%s' '$PasswordQuote' | $envPrefix gnome-keyring-daemon --unlock 2>&1 | tail -n 3; exit `${PIPESTATUS[1]}"
+  return Invoke-Wsl $LinuxUser "$(Get-WslUnlockPipeline -PasswordQuote $PasswordQuote -Uid $Uid); exit `${PIPESTATUS[1]}"
+}
+
+# Parser puro do protocolo unlock+sonda (marcadores UBUNTUGUI_*). Fail-closed:
+# sem marcador de codigo (-1) ou sonda vazia, o chamador trata como Error.
+function Read-UnlockProbeOutput([string]$Out) {
+  $code = -1; $probe = ''
+  foreach ($line in ($Out -split "`n")) {
+    if ($line -match '^UBUNTUGUI_UNLOCKCODE=(\d+)\s*$') { $code = [int]$Matches[1] }
+    elseif ($line -match '^UBUNTUGUI_PROBE=(.*)$') { $probe = $Matches[1].Trim() }
+  }
+  return @{ UnlockCode = $code; Probe = $probe }
+}
+
+# Unlock + sonda na MESMA invocacao WSL. Retorna @{ UnlockCode; State; Probe;
+# UnlockText }. O Code do Invoke-Wsl e ignorado de proposito (o echo final
+# sempre sai 0): vale o UnlockCode parseado. UnlockText nunca vem vazio
+# (vira '(vazio)') p/ as mensagens de falha nao sairem ocas.
+function UnlockAndProbe-WslKeyring([string]$LinuxUser, [string]$PasswordQuote, [string]$Uid) {
+  $unlockPipe = Get-WslUnlockPipeline -PasswordQuote $PasswordQuote -Uid $Uid
+  $probeCmd = Get-WslKeyringProbeCommand -Uid $Uid
+  $r = Invoke-Wsl $LinuxUser "$unlockPipe; ucode=`${PIPESTATUS[1]}; probe=`$($probeCmd); echo UBUNTUGUI_UNLOCKCODE=`$ucode; echo UBUNTUGUI_PROBE=`$probe"
+  $parsed = Read-UnlockProbeOutput -Out $r.Out
+  if ($parsed.UnlockCode -lt 0 -or [string]::IsNullOrWhiteSpace($parsed.Probe)) { $state = 'Error' }
+  elseif (Test-UnlockedPropertyOutput -Out $parsed.Probe) { $state = 'Unlocked' }
+  elseif ($parsed.Probe -match 'b true') { $state = 'Locked' }
+  else { $state = 'Error' }
+  $ut = ((($r.Out -split "`n") | Where-Object { $_ -notmatch '^UBUNTUGUI_' }) -join "`n").Trim()
+  if ([string]::IsNullOrWhiteSpace($ut)) { $ut = '(vazio)' }
+  return @{ UnlockCode = $parsed.UnlockCode; State = $state; Probe = $parsed.Probe; UnlockText = $ut }
 }
 
 # Grava usuario+senha do RDP no cofre. 'env' e obrigatorio apos 'timeout'
@@ -144,13 +187,40 @@ function Test-UnlockedPropertyOutput([string]$Out) {
   return ($Out -match 'b false')
 }
 
+# Estado da sonda do cofre: Locked vs Unlocked vs Error. Fail-closed como
+# antes (so 'b false' prova destravado), mas sem confundir 'trancado' com
+# 'sonda quebrou': 'b true' = trancado de verdade; qualquer outra saida (bus
+# fora, alias ausente) = Error, que pede outro conserto (D-Bus/sessao, nao
+# apagar o keyring). 2>&1 de proposito: o texto do erro e o diagnostico.
+function Get-WslKeyringProbeState([string]$LinuxUser, [string]$Uid) {
+  $r = Invoke-Wsl $LinuxUser (Get-WslKeyringProbeCommand -Uid $Uid)
+  $out = if ($r.Out) { $r.Out.Trim() } else { '' }
+  if (Test-UnlockedPropertyOutput -Out $out) { return @{ State = 'Unlocked'; Out = $out } }
+  if ($out -match 'b true') { return @{ State = 'Locked'; Out = $out } }
+  return @{ State = 'Error'; Out = $out }
+}
+
 # Sonda sem prompt: colecao 'default' destravada? Le a propriedade Locked via
 # busctl (retorna na hora, nunca abre prompt). Qualquer duvida = $false:
 # melhor falhar rapido com instrucao do que travar 60s no set-credentials.
 function Test-WslKeyringUnlocked([string]$LinuxUser, [string]$Uid) {
+  return ((Get-WslKeyringProbeState -LinuxUser $LinuxUser -Uid $Uid).State -eq 'Unlocked')
+}
+
+# Detalhe so p/ falha Locked: a colecao LOGIN esta trancada ou o DEFAULT aponta
+# p/ outra colecao? Quais arquivos existem, quantos daemons rodam. So leitura,
+# so chamado no caminho de falha (custo zero no sucesso). Se o caminho da
+# colecao estiver errado, o busctl devolve erro como texto - que tambem e
+# evidencia, nunca quebra.
+function Get-WslKeyringLockDetail([string]$LinuxUser, [string]$Uid) {
   $envPrefix = New-WslSessionEnv -Uid $Uid
-  $r = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked 2>/dev/null"
-  return (Test-UnlockedPropertyOutput -Out $r.Out)
+  $login = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login org.freedesktop.Secret.Collection Locked 2>&1"
+  $files = Invoke-Wsl $LinuxUser "ls ~/.local/share/keyrings/ 2>/dev/null || echo SEM-DIR"
+  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -c gnome-keyring-daemon 2>/dev/null); echo daemons=`$daemons"
+  $loginOut = if ($login.Out) { $login.Out.Trim() } else { '(vazio)' }
+  $filesOut = if ($files.Out) { $files.Out.Trim() } else { '(vazio)' }
+  $daemonOut = if ($daemons.Out) { $daemons.Out.Trim() } else { '(vazio)' }
+  return "login Locked=[$loginOut] arquivos=[$filesOut] $daemonOut"
 }
 # Escapa a senha para embutir em 'bash -c "..."' (escapa bash + PowerShell).
 function Get-PasswordQuote([string]$Password) {
@@ -553,6 +623,7 @@ $UBUNTU_CODENAME = "resolute"               # 26.04 LTS (informativo)
 $MinBuild        = $D.MinBuildMirrored
 $CredTimeoutSec  = $D.CredTimeoutSec
 $CredRetries     = $D.CredRetries
+$KeyringReprobeSec = $D.KeyringReprobeSec
 $AptRetries      = $D.AptRetries
 $RdpSettleSec    = $D.RdpSettleSec
 $WslWaitSec      = $D.WslShutdownWaitSec
@@ -878,16 +949,29 @@ Ok "/etc/pam.d/sudo intacto"
 # instrucao, nunca 2x60s de retry queimado a toa (sintoma: tentativas mudas).
 $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
 Write-Host "  Desbloqueando o cofre..." -ForegroundColor Yellow
-$unlock = Unlock-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
-if ($unlock.Code -ne 0) {
-  Fail "Cofre nao desbloqueou com a senha informada ($($unlock.Out.Trim())) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+# Unlock + sonda na MESMA chamada (daemon pode ser efemero: ativado por D-Bus,
+# some em segundos; duas chamadas podem atingir instancias diferentes).
+$uk = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+if ($uk.UnlockCode -ne 0) {
+  Fail "Cofre nao desbloqueou com a senha informada ($($uk.UnlockText)) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
   throw "Cofre bloqueado"
 }
 # Sonda sem prompt antes de gravar: trancado = set-credentials travaria ate o
-# timeout. Puxa o retorno agora (segundos) em vez de esperar o estouro de 60s.
-if (-not (Test-WslKeyringUnlocked -LinuxUser $LinuxUser -Uid $Uid)) {
-  Fail "Cofre segue trancado apos o unlock (sem prompt p/ abrir: gravacao travaria) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
-  throw "Cofre bloqueado"
+# timeout. Uma repeticao apos a espera absorve ativacao lenta do D-Bus; se
+# falhar de novo, classifica Locked (cofre de outro run) vs Error (sonda
+# quebrou: D-Bus/sessao, outro conserto - nao apague o keyring a toa).
+if ($uk.State -ne 'Unlocked') {
+  Start-Sleep -Seconds $KeyringReprobeSec
+  $uk2 = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+  if ($uk2.State -eq 'Unlocked') { Ok "Cofre destravou na re-sonda" }
+  elseif ($uk2.State -eq 'Error') {
+    Fail "Sonda do cofre falhou (nao e 'trancado': D-Bus/sessao?) - retorno: $($uk2.Probe) - unlock disse: $($uk2.UnlockText) - tente 'wsl --shutdown' e rode de novo"
+    throw "Cofre bloqueado"
+  } else {
+    $lockDetail = Get-WslKeyringLockDetail -LinuxUser $LinuxUser -Uid $Uid
+    Fail "Cofre segue trancado apos o unlock (unlock saiu $($uk2.UnlockCode); unlock disse: $($uk2.UnlockText); $lockDetail) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+    throw "Cofre bloqueado"
+  }
 }
 
 # Credencial + TLS + servico (com retry, sem prompt: cofre ja existe destravado).

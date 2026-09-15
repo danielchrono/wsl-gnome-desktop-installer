@@ -55,6 +55,7 @@ $UBUNTU_CODENAME = "resolute"               # 26.04 LTS (informativo)
 $MinBuild        = $D.MinBuildMirrored
 $CredTimeoutSec  = $D.CredTimeoutSec
 $CredRetries     = $D.CredRetries
+$KeyringReprobeSec = $D.KeyringReprobeSec
 $AptRetries      = $D.AptRetries
 $RdpSettleSec    = $D.RdpSettleSec
 $WslWaitSec      = $D.WslShutdownWaitSec
@@ -380,16 +381,29 @@ Ok "/etc/pam.d/sudo intacto"
 # instrucao, nunca 2x60s de retry queimado a toa (sintoma: tentativas mudas).
 $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
 Write-Host "  Desbloqueando o cofre..." -ForegroundColor Yellow
-$unlock = Unlock-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
-if ($unlock.Code -ne 0) {
-  Fail "Cofre nao desbloqueou com a senha informada ($($unlock.Out.Trim())) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+# Unlock + sonda na MESMA chamada (daemon pode ser efemero: ativado por D-Bus,
+# some em segundos; duas chamadas podem atingir instancias diferentes).
+$uk = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+if ($uk.UnlockCode -ne 0) {
+  Fail "Cofre nao desbloqueou com a senha informada ($($uk.UnlockText)) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
   throw "Cofre bloqueado"
 }
 # Sonda sem prompt antes de gravar: trancado = set-credentials travaria ate o
-# timeout. Puxa o retorno agora (segundos) em vez de esperar o estouro de 60s.
-if (-not (Test-WslKeyringUnlocked -LinuxUser $LinuxUser -Uid $Uid)) {
-  Fail "Cofre segue trancado apos o unlock (sem prompt p/ abrir: gravacao travaria) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
-  throw "Cofre bloqueado"
+# timeout. Uma repeticao apos a espera absorve ativacao lenta do D-Bus; se
+# falhar de novo, classifica Locked (cofre de outro run) vs Error (sonda
+# quebrou: D-Bus/sessao, outro conserto - nao apague o keyring a toa).
+if ($uk.State -ne 'Unlocked') {
+  Start-Sleep -Seconds $KeyringReprobeSec
+  $uk2 = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
+  if ($uk2.State -eq 'Unlocked') { Ok "Cofre destravou na re-sonda" }
+  elseif ($uk2.State -eq 'Error') {
+    Fail "Sonda do cofre falhou (nao e 'trancado': D-Bus/sessao?) - retorno: $($uk2.Probe) - unlock disse: $($uk2.UnlockText) - tente 'wsl --shutdown' e rode de novo"
+    throw "Cofre bloqueado"
+  } else {
+    $lockDetail = Get-WslKeyringLockDetail -LinuxUser $LinuxUser -Uid $Uid
+    Fail "Cofre segue trancado apos o unlock (unlock saiu $($uk2.UnlockCode); unlock disse: $($uk2.UnlockText); $lockDetail) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+    throw "Cofre bloqueado"
+  }
 }
 
 # Credencial + TLS + servico (com retry, sem prompt: cofre ja existe destravado).

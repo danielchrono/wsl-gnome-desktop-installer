@@ -133,6 +133,123 @@ Describe 'New-WslSessionEnv' {
   }
 }
 
+Describe 'Get-WslKeyringProbeState' {
+  It "classifica 'b false' como Unlocked" {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'b false' } }
+        (Get-WslKeyringProbeState -LinuxUser 'u' -Uid '1000').State
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'Unlocked'
+  }
+  It "classifica 'b true' como Locked" {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = 'b true' } }
+        (Get-WslKeyringProbeState -LinuxUser 'u' -Uid '1000').State
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'Locked'
+  }
+  It 'classifica erro de bus como Error (nao Locked)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 1; Out = 'Failed to connect to bus: No such file' } }
+        $s = Get-WslKeyringProbeState -LinuxUser 'u' -Uid '1000'
+        @($s.State, (Test-WslKeyringUnlocked -LinuxUser 'u' -Uid '1000')) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'Error,False'
+  }
+  It 'classifica saida vazia como Error' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 0; Out = '' } }
+        (Get-WslKeyringProbeState -LinuxUser 'u' -Uid '1000').State
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'Error'
+  }
+  It 're-sonda limitada a 5s (tunable)' {
+    (& (Get-Module UbuntuGui) { (Get-UbuntuGuiDefaults).KeyringReprobeSec }) | Should Be 5
+  }
+}
+
+Describe 'Get-WslKeyringLockDetail' {
+  It 'mostra login/arquivos/daemons' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          if ($Command -match 'collection/login') { return @{ Code = 0; Out = 'b true' } }
+          if ($Command -match 'keyrings') { return @{ Code = 0; Out = 'login.keyring' } }
+          if ($Command -match 'pgrep') { return @{ Code = 0; Out = 'daemons=0' } }
+          return @{ Code = 0; Out = '' }
+        }
+        Get-WslKeyringLockDetail -LinuxUser 'u' -Uid '1000'
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'login Locked=[b true] arquivos=[login.keyring] daemons=0'
+  }
+  It 'nunca quebra com saidas vazias' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 1; Out = '' } }
+        Get-WslKeyringLockDetail -LinuxUser 'u' -Uid '1000'
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'login Locked=[(vazio)] arquivos=[(vazio)] (vazio)'
+  }
+}
+
+Describe 'Get-WslUnlockPipeline' {
+  It 'comando byte-identico ao unlock historico' {
+    (& (Get-Module UbuntuGui) { Get-WslUnlockPipeline -PasswordQuote 'pwq' -Uid '1000' }) | Should Be "printf '%s' 'pwq' | XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus gnome-keyring-daemon --unlock 2>&1 | tail -n 3"
+  }
+}
+
+Describe 'Read-UnlockProbeOutput' {
+  It 'extrai codigo e sonda (trancado)' {
+    (& (Get-Module UbuntuGui) {
+      $p = Read-UnlockProbeOutput -Out "SSH_AUTH_SOCK=/x`nUBUNTUGUI_UNLOCKCODE=0`nUBUNTUGUI_PROBE=b true"
+      @($p.UnlockCode, $p.Probe) -join ','
+    }) | Should Be '0,b true'
+  }
+  It 'sem marcadores vira Error (-1)' {
+    (& (Get-Module UbuntuGui) {
+      $p = Read-UnlockProbeOutput -Out 'qualquer lixo'
+      @($p.UnlockCode, $p.Probe) -join ','
+    }) | Should Be '-1,'
+  }
+}
+
+Describe 'UnlockAndProbe-WslKeyring' {
+  It 'unlock+sonda numa UNICA chamada WSL (Locked)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      $script:calls = @()
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          $script:calls += $Command
+          return @{ Code = 0; Out = "UBUNTUGUI_UNLOCKCODE=0`nUBUNTUGUI_PROBE=b true" } }
+        $r = UnlockAndProbe-WslKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000'
+        @($script:calls.Count, ($script:calls -join '|' -match 'gnome-keyring-daemon --unlock'), ($script:calls -join '|' -match 'get-property'), $r.UnlockCode, $r.State) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be '1,True,True,0,Locked'
+  }
+  It 'mapeia sonda aberta para Unlocked' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          return @{ Code = 0; Out = "UBUNTUGUI_UNLOCKCODE=0`nUBUNTUGUI_PROBE=b false" } }
+        $r = UnlockAndProbe-WslKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000'
+        @($r.UnlockCode, $r.State) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be '0,Unlocked'
+  }
+}
+
 Describe 'Get-DefaultLinuxUser' {
   It 'prefere o salvo entre runs' {
     (& (Get-Module UbuntuGui) { Get-DefaultLinuxUser -SavedUser '  salvo  ' -WindowsUser 'Daniel' }) | Should Be 'salvo'

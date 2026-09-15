@@ -105,5 +105,11 @@ check('ip do wsl via helper unico', 'Get-WslIpAddress -Distro $DISTRO' in src an
 check('securestring via helper unico (+ ZeroFreeBSTR)', 'ConvertFrom-SecureStringPlain' in src and src.count('SecureStringToBSTR') == 1 and 'ZeroFreeBSTR' in src)
 check('caminho linux-user.txt em fonte unica', '$SavedUserFile' in install_src and '(Join-Path $ProgDir "linux-user.txt")' not in src)
 check('novos helpers no build', 'function ConvertFrom-SecureStringPlain' in src and 'function Get-WslIpAddress' in src and 'function Test-WslShellActive' in src and 'function Test-WslRdpListening' in src)
+check('sonda do cofre classifica Locked vs Error', 'function Get-WslKeyringProbeState' in src and "'Unlocked'" in src and "'Locked'" in src and "'Error'" in src)
+check('falha do cofre mostra evidencia (unlock + sonda)', 'unlock disse:' in src and 'Sonda do cofre falhou' in src and 'Cofre destravou na re-sonda' in src)
+check('re-sonda limitada (sem retry cego)', 'KeyringReprobeSec' in src and 'Start-Sleep -Seconds $KeyringReprobeSec' in src)
+check('falha Locked traz detalhe (login/arquivos/daemons)', 'function Get-WslKeyringLockDetail' in src and 'collection/login' in src and 'pgrep -c gnome-keyring-daemon' in src)
+check('unlock+sonda mesma chamada (daemon efemero)', 'function UnlockAndProbe-WslKeyring' in src and 'function Read-UnlockProbeOutput' in src and 'UBUNTUGUI_UNLOCKCODE=' in src and 'UBUNTUGUI_PROBE=' in src)
+check('unlock/sonda via builders unicos', 'function Get-WslUnlockPipeline' in src and 'function Get-WslKeyringProbeCommand' in src and install_src.count('UnlockAndProbe-WslKeyring -LinuxUser') == 2 and 'Unlock-WslKeyring -LinuxUser' not in install_src)
 
 sys.exit(1 if fails else 0)

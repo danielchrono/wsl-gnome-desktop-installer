@@ -11,6 +11,7 @@ $script:UbuntuGuiDefaults = @{
   MinBuildMirrored     = 22621   # Win11 22H2+: mirrored networking
   CredTimeoutSec       = 60      # timeout por tentativa de set-credentials
   CredRetries          = 2       # tentativas de gravacao no cofre
+  KeyringReprobeSec    = 5       # espera antes da re-sonda (corrida de ativacao do D-Bus)
   AptRetries           = 3       # tentativas de apt install
   RdpSettleSec         = 4       # espera pos-restart do RDP
   WslShutdownWaitSec   = 8       # espera pos wsl --shutdown
