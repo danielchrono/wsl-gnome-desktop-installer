@@ -13,6 +13,7 @@
 //! - `Get-FirstIpAddress.ps1` + `Get-WslIpAddress.ps1` -> [`ip`]
 //! - `Test-WslServiceHealth.ps1` -> [`health`]
 //! - `Test-InstallInput.ps1` -> [`input`]
+//! - Selecao de porta RDP (nova, sem equivalente PS1) -> [`net`]
 //! - `Show-TuiMenu.ps1` -> [`tui`]
 //! - `New-RdpFileContent.ps1` -> [`rdp`]
 //! - `New-LauncherContent.ps1` -> [`launcher`]
@@ -38,6 +39,7 @@ pub mod input;
 pub mod install;
 pub mod ip;
 pub mod launcher;
+pub mod net;
 pub mod passquote;
 pub mod rdp;
 pub mod resume;

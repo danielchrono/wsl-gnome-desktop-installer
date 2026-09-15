@@ -11,7 +11,12 @@ pub struct UbuntuGuiDefaults {
     pub distro: String,
     pub gui_package: String,
     pub fallback_resolution: String,
+    /// Porta RDP preferida (padrao: 3389, porta oficial do Windows RDP).
     pub rdp_port: u16,
+    /// Porta alternativa usada automaticamente quando `rdp_port` esta ocupada.
+    /// SSOT: elimina o magic number 3390 espalhado no codigo (FP: sem literal
+    /// duplicado; ViewModel decide a politica, orquestrador apenas chama).
+    pub rdp_fallback_port: u16,
     pub app_name: String,
     pub icon_url: String,
     pub min_build_mirrored: u32,
@@ -45,11 +50,12 @@ pub struct UbuntuGuiDefaults {
 /// chamador nao mutar a fonte unica.
 pub fn defaults() -> UbuntuGuiDefaults {
     UbuntuGuiDefaults {
-        // Porta longe da 3389 (erro 0x708 no loopback).
         distro: "Ubuntu".to_string(),
         gui_package: "ubuntu-desktop-minimal".to_string(),
         fallback_resolution: "1600x900".to_string(),
+        // Porta oficial do Windows RDP; fallback para 3390 se ocupada (net::choose_rdp_port).
         rdp_port: 3389,
+        rdp_fallback_port: 3390,
         app_name: "Ubuntu-GUI".to_string(),
         icon_url: "https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512".to_string(),
         // Win11 22H2+: mirrored networking.
@@ -92,8 +98,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn port_away_from_3389() {
-        assert_eq!(defaults().rdp_port, 3389);
+    fn rdp_port_defaults_with_fallback() {
+        let d = defaults();
+        assert_eq!(d.rdp_port, 3389);
+        assert_eq!(d.rdp_fallback_port, 3390);
+        // Fallback deve ser diferente da porta preferida
+        assert_ne!(d.rdp_port, d.rdp_fallback_port);
     }
 
     #[test]

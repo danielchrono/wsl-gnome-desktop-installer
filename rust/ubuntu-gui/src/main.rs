@@ -50,8 +50,8 @@ struct Cli {
     #[arg(long)]
     fallback_res: Option<String>,
 
-    /// Porta RDP (padrao 3390, longe da 3389 que e a porta do RDP do host).
-    /// Se explicita, pre-voo TCP avisa quando ocupada (tenta mesmo assim).
+    /// Porta RDP (padrao: 3389; se ocupada, cai automaticamente para 3390 via net::choose_rdp_port).
+    /// Se informada explicitamente, substitui a selecao automatica.
     #[arg(long)]
     rdp_port: Option<u16>,
 

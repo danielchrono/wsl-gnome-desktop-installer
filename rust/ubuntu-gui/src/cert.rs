@@ -113,7 +113,8 @@ fn find_in_my_store(subject: &str) -> Result<Option<String>, InstallError> {
         .map_err(|e| InstallError::Io(format!("CertOpenStore My: {e}")))?;
         let want = store_name_wide(subject);
         let mut found: Option<String> = None;
-        let mut prev: *const _ = std::ptr::null();
+        // v0.61: CertFindCertificateInStore exige Option<*const CERT_CONTEXT> para prev.
+        let mut prev: Option<*const windows::Win32::Security::Cryptography::CERT_CONTEXT> = None;
         loop {
             let ctx = CertFindCertificateInStore(
                 store,
@@ -126,12 +127,13 @@ fn find_in_my_store(subject: &str) -> Result<Option<String>, InstallError> {
             if ctx.is_null() {
                 break;
             }
-            prev = ctx;
+            prev = Some(ctx);
             // Subject exato (o FIND ja filtra por substring; confirma eq).
             let mut buf = [0u16; 512];
             let len = CertGetNameStringW(
                 ctx,
-                CERT_NAME_SIMPLE_DISPLAY_TYPE.0 as u32,
+                // v0.61: CERT_NAME_SIMPLE_DISPLAY_TYPE e um u32 direto (sem .0).
+                windows::Win32::Security::Cryptography::CERT_NAME_SIMPLE_DISPLAY_TYPE,
                 0,
                 None,
                 Some(&mut buf),
@@ -147,7 +149,8 @@ fn find_in_my_store(subject: &str) -> Result<Option<String>, InstallError> {
                 break;
             }
         }
-        let _ = CertCloseStore(store, 0);
+        // v0.61: CertCloseStore recebe Option<HCERTSTORE>.
+        let _ = CertCloseStore(Some(store), 0);
         Ok(found)
     }
 }
@@ -171,11 +174,18 @@ fn add_der_to_store(store_name: &str, der: &[u8]) -> Result<(), InstallError> {
             Some(store_param.as_ptr() as *const _),
         )
         .map_err(|e| InstallError::Io(format!("CertOpenStore {store_name}: {e}")))?;
-        let ctx = CertCreateCertificateContext(X509_ASN_ENCODING, der.as_ptr(), der.len() as u32)
-            .map_err(|e| InstallError::CertFailed(format!("CertCreateContext: {e}")))?;
-        CertAddCertificateContextToStore(store, ctx, CERT_STORE_ADD_REPLACE_EXISTING, None)
+        // v0.61: CertCreateCertificateContext recebe &[u8] (nao ptr+len).
+        let ctx = CertCreateCertificateContext(X509_ASN_ENCODING, der);
+        if ctx.is_null() {
+            let _ = CertCloseStore(Some(store), 0);
+            return Err(InstallError::CertFailed(
+                "CertCreateCertificateContext retornou NULL".to_string(),
+            ));
+        }
+        // v0.61: CertAddCertificateContextToStore e CertCloseStore recebem Option<HCERTSTORE>.
+        CertAddCertificateContextToStore(Some(store), ctx, CERT_STORE_ADD_REPLACE_EXISTING, None)
             .map_err(|e| InstallError::CertFailed(format!("CertAdd {store_name}: {e}")))?;
-        let _ = CertCloseStore(store, 0);
+        let _ = CertCloseStore(Some(store), 0);
         Ok(())
     }
 }

@@ -84,7 +84,8 @@ pub fn protect_password_hex(linux_pass: &str) -> Result<String, InstallError> {
             .map_err(|e| InstallError::Io(format!("DPAPI CryptProtectData: {e}")))?;
         let bytes = std::slice::from_raw_parts(blob_out.pbData, blob_out.cbData as usize);
         let hex = blob_to_hex(bytes);
-        let _ = LocalFree(blob_out.pbData as _);
+        // v0.61: LocalFree recebe Option<HLOCAL>; HLOCAL wrapa o ponteiro.
+        let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(blob_out.pbData as *mut _)));
         Ok(hex)
     }
 }

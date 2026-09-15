@@ -184,19 +184,6 @@ pub fn tls_cert_create_command(tls_cert_path: &str, tls_key_path: &str, tls_days
     )
 }
 
-/// Pre-voo da `--rdp-port` explicita: porta ocupada AGORA? Aviso apenas —
-/// a verificacao pos-apply e o gate real, e rerun com a mesma porta ocupada
-/// pelo proprio RDP anterior nao pode falhar.
-pub fn probe_tcp_port(host: &str, port: u16, timeout_ms: u64) -> bool {
-    use std::net::{SocketAddr, TcpStream};
-    use std::time::Duration;
-    let addr: SocketAddr = match format!("{host}:{port}").parse() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)).is_ok()
-}
-
 /// Aplica TLS/porta + habilita e reinicia o RDP.
 pub fn rdp_apply_command(
     tls_cert_path: &str,
@@ -434,7 +421,11 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         .fallback_resolution
         .clone()
         .unwrap_or(d.fallback_resolution.clone());
-    let rdp_port = opts.rdp_port.unwrap_or(d.rdp_port);
+    // ViewModel puro decide a porta (net::choose_rdp_port); orquestrador
+    // emite o Warn se houve fallback (FP: sem efeito colateral no ViewModel).
+    let requested_port = opts.rdp_port.unwrap_or(d.rdp_port);
+    let port_choice = crate::net::choose_rdp_port(requested_port, d.rdp_fallback_port, 1500);
+    let rdp_port = port_choice.port;
     let app_name = opts.app_name.clone().unwrap_or(d.app_name.clone());
     // Nao assistido implica sem TUI (cinto + suspensorio: os prompts sao
     // pulados por `opts.unattended` mesmo assim).
@@ -445,6 +436,16 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
 
     // ---- pre-checks ------------------------------------------------------
     rep.step("Pre-checagens (Windows, rede, WSL)");
+    // Porta RDP: ViewModel ja decidiu; orquestrador emite o aviso se necessario.
+    if port_choice.fell_back {
+        rep.warn(&format!(
+            "Porta {} ocupada (Windows RDP nativo?); usando {} como alternativa (ou passe --rdp-port para forcar outra)",
+            port_choice.requested, port_choice.port
+        ));
+    } else {
+        rep.ok(&format!("Porta RDP: {rdp_port}"));
+    }
+
     let ver_out = Command::new("cmd")
         .args(["/c", "ver"])
         .output()
@@ -1098,11 +1099,6 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         return Err(InstallError::CredentialNotStored);
     }
     rep.ok("Credencial RDP gravada");
-    // Pre-voo da porta explicita (medido: 3389 trava no loopback sem
-    // listener; com RDP de verdade funciona - mas o padrao segue 3390).
-    if opts.rdp_port.is_some() && probe_tcp_port("127.0.0.1", rdp_port, 1500) {
-        rep.warn(&format!("Porta {rdp_port} parece ocupada (pode ser instalacao anterior) - tentando mesmo assim; a verificacao final decide"));
-    }
     rep.say(&format!(
         "  Aplicando TLS/porta {rdp_port} e reiniciando o servico..."
     ));
@@ -1283,14 +1279,14 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         if wsl_restart_needed {
             rep.say("  REINICIE o Windows (ou rode 'wsl --shutdown') p/ valer o mirrored");
         }
-        Ok(InstallOutcome::Done)
+        return Ok(InstallOutcome::Done);
     } else {
         rep.say("TERMINOU COM FALHAS:");
         for f in failures {
             rep.say(&format!("  - {f}"));
         }
         rep.say("Rode de novo (retoma sozinho) ou veja o log (tem a senha dentro - apague depois)");
-        Err(InstallError::FinishedWithFailures)
+        return Err(InstallError::FinishedWithFailures);
     }
 
     #[allow(dead_code)]
@@ -1572,7 +1568,7 @@ mod tests {
     fn tcp_probe_sees_live_listener() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(probe_tcp_port("127.0.0.1", port, 1000));
+        assert!(crate::net::is_port_in_use("127.0.0.1", port, 1000));
     }
 
     #[test]
@@ -1581,7 +1577,7 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.local_addr().unwrap().port()
         };
-        assert!(!probe_tcp_port("127.0.0.1", port, 500));
+        assert!(!crate::net::is_port_in_use("127.0.0.1", port, 500));
     }
 
     #[test]
@@ -1635,10 +1631,13 @@ mod tests {
     fn shortcut_file_builds_valid_lnk() {
         let dir = std::env::temp_dir().join(format!("ubuntu-gui-lnk-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
+        // mslnk exige que o target exista; criamos um .cmd temporario real.
+        let target_cmd = dir.join("Ubuntu-GUI.cmd");
+        let _ = std::fs::write(&target_cmd, "@echo off\r\n");
         let lnk = dir.join("Ubuntu-GUI.lnk");
         build_shortcut_file(
-            std::path::Path::new(r"C:\App\Ubuntu-GUI.cmd"),
-            std::path::Path::new(r"C:\App"),
+            &target_cmd,
+            &dir,
             r"C:\Icons\ubuntu.ico,0",
             &lnk,
         )

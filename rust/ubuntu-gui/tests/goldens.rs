@@ -119,7 +119,8 @@ fn reboot_sentinel_and_version_golden() {
 fn no_local_paths_and_centralized_defaults() {
     // Defaults centralizados: porta/distro vern da fonte unica, nunca hardcoded.
     let d = ubuntu_gui::constants::defaults();
-    assert_eq!(d.rdp_port, 3390);
+    assert_eq!(d.rdp_port, 3389);           // porta preferida (SSOT)
+    assert_eq!(d.rdp_fallback_port, 3390);  // fallback automatico via net::choose_rdp_port
     assert_eq!(d.distro, "Ubuntu");
     assert_eq!(d.app_name, "Ubuntu-GUI");
     // Nada de caminho absoluto local nos tunables (build portatil).

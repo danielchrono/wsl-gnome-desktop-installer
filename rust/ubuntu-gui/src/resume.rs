@@ -147,7 +147,8 @@ pub fn protect_password_base64(linux_pass: &str) -> Result<String, InstallError>
             .map_err(|e| InstallError::Io(format!("DPAPI CryptProtectData: {e}")))?;
         let bytes = std::slice::from_raw_parts(blob_out.pbData, blob_out.cbData as usize);
         let enc = base64_encode(bytes);
-        let _ = LocalFree(blob_out.pbData as _);
+        // v0.61: LocalFree recebe Option<HLOCAL>; HLOCAL wrapa o ponteiro.
+        let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(blob_out.pbData as *mut _)));
         Ok(enc)
     }
 }
@@ -178,7 +179,8 @@ pub fn unprotect_password_base64(enc: &str) -> Result<String, InstallError> {
         let s = String::from_utf8(bytes.to_vec()).map_err(|e| {
             InstallError::ResumeUnreadable(format!("estado de retomada nao-UTF8: {e}"))
         })?;
-        let _ = LocalFree(blob_out.pbData as _);
+        // v0.61: LocalFree recebe Option<HLOCAL>; HLOCAL wrapa o ponteiro.
+        let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(blob_out.pbData as *mut _)));
         Ok(s)
     }
 }
