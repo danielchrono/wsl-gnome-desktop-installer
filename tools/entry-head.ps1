@@ -24,3 +24,4 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
 
 $SCRIPT_BUILD = "__BUILD_ID__"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
+$script:UbuntuGuiBannerShown = $true

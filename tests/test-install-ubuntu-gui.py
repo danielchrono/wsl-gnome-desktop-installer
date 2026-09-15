@@ -99,6 +99,7 @@ check('launcher usa reserva do WSL se mstsc ausente', 'FREERDP_VAL' in src and '
 check('elevacao relanca o proprio cmd (caixa preta)', "'%~f0'" in head and 'Verb RunAs' in head)
 check('elevacao repassa argumentos do cmd', "'%*'" in head)
 check('ps1 nao re-eleva quando vem do cmd', 'UBUNTUGUI_FROM_CMD' in src and 'UBUNTUGUI_FROM_CMD' in head)
+check('titulo impresso uma vez (entry-head manda)', src.count('UbuntuGuiBannerShown') == 2 and 'if (-not $script:UbuntuGuiBannerShown)' in src)
 check('auto-elevacao com UAC (sem bypass)', '-Verb RunAs' in src and 'Auto-elevacao' in src and 'Unattended nunca relanca' in src)
 check('build carimbado (id deterministico)', '__BUILD_ID__' not in src and '$SCRIPT_BUILD' in src)
 check('build id e hex de 12', re.search(r'\$SCRIPT_BUILD = "[0-9a-f]{12}"', src) is not None)

@@ -45,8 +45,9 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "53197676d3d8"
+$SCRIPT_BUILD = "1818d37d4b67"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
+$script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
 # Install-WslUbuntuGui mapeia para locais curtas ($RDP_PORT, $MinBuild, ...);
 # Private/* leem via $script:UbuntuGuiDefaults (vale no modulo e no .cmd).
@@ -845,7 +846,8 @@ $RunOnceName = "UbuntuGUIResume"
 Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 
 # ============================== PRE-CHECKS ==============================
-Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION" -ForegroundColor Cyan
+# Banner unico: no .cmd o entry-head ja imprimiu (com build id); aqui so no modulo.
+if (-not $script:UbuntuGuiBannerShown) { Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION" -ForegroundColor Cyan }
 Step "Pre-checagens (Windows, rede, WSL)"
 $os = [Environment]::OSVersion.Version
 if ($os.Major -lt 10 -or ($os.Major -eq 10 -and $os.Build -lt 19041)) {

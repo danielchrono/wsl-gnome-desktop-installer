@@ -96,7 +96,8 @@ $RunOnceName = "UbuntuGUIResume"
 Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 
 # ============================== PRE-CHECKS ==============================
-Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION" -ForegroundColor Cyan
+# Banner unico: no .cmd o entry-head ja imprimiu (com build id); aqui so no modulo.
+if (-not $script:UbuntuGuiBannerShown) { Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION" -ForegroundColor Cyan }
 Step "Pre-checagens (Windows, rede, WSL)"
 $os = [Environment]::OSVersion.Version
 if ($os.Major -lt 10 -or ($os.Major -eq 10 -and $os.Build -lt 19041)) {
