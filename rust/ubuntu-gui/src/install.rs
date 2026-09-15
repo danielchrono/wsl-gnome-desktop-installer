@@ -218,6 +218,21 @@ pub fn icon_build_command(icon_url: &str, wsl_ico_path: &str, sizes_arg: &str) -
     )
 }
 
+/// `wsl --install -d <distro> --no-launch`: instala SEM abrir o OOBE
+/// interativo (que pediria usuario/senha/metricas de novo no console - a
+/// etapa 2 ja provisiona tudo sozinha via useradd/chpasswd). Sem
+/// `--no-launch`, o instalador do Ubuntu gruda no console e a run trava
+/// nele antes mesmo do reboot programado.
+pub fn wsl_install_argv(distro: &str) -> Vec<String> {
+    vec![
+        "wsl".to_string(),
+        "--install".to_string(),
+        "-d".to_string(),
+        distro.to_string(),
+        "--no-launch".to_string(),
+    ]
+}
+
 /// Comando de reboot com conta regressiva (+ dica `shutdown /a`).
 pub fn shutdown_reboot_command(delay_sec: u64) -> String {
     format!("shutdown /r /t {delay_sec} /c \"Ubuntu-GUI: reiniciando p/ continuar a instalacao sozinho\"")
@@ -286,6 +301,10 @@ pub enum InstallOutcome {
     Done,
     RebootRequired,
 }
+
+/// Tentativas de digitacao da senha antes do fail-fast (errar a confirmacao
+/// nao mata o run na primeira).
+pub const PASSWORD_MAX_ATTEMPTS: u32 = 3;
 
 /// Opcoes do instalador (params de `Install-WslUbuntuGui` + `--resume` e
 /// transcript do `main`, que substituem head/tail/header/footer).
@@ -547,13 +566,32 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         if let Some(p) = opts.linux_password.clone() {
             linux_pass = secure::SecureStr::new(p);
         } else {
-            let s1 = tui::read_secure_password(&format!("Senha do usuario {linux_user}"), no_tui);
-            let s2 = tui::read_secure_password("Confirme a senha", no_tui);
-            if s1.expose() != s2.expose() || s1.expose().is_empty() {
-                rep.fail("Senhas diferentes ou vazias - rode de novo".to_string());
-                return Err(InstallError::PasswordMismatch);
+            // Retry: errar a confirmacao nao mata o run (fail-fast so apos N).
+            let mut pass = None;
+            for attempt in 1..=PASSWORD_MAX_ATTEMPTS {
+                let s1 =
+                    tui::read_secure_password(&format!("Senha do usuario {linux_user}"), no_tui);
+                let s2 = tui::read_secure_password("Confirme a senha", no_tui);
+                if input::passwords_match(s1.expose(), s2.expose()) {
+                    pass = Some(s1);
+                    break;
+                }
+                if attempt < PASSWORD_MAX_ATTEMPTS {
+                    rep.warn(&format!(
+                        "Senhas diferentes ou vazias - tente de novo ({attempt}/{PASSWORD_MAX_ATTEMPTS})"
+                    ));
+                }
             }
-            linux_pass = s1;
+            match pass {
+                Some(p) => linux_pass = p,
+                None => {
+                    rep.fail(
+                        "Senhas diferentes ou vazias apos 3 tentativas - rode de novo"
+                            .to_string(),
+                    );
+                    return Err(InstallError::PasswordMismatch);
+                }
+            }
         }
         rep.ok(&format!("Usuario Linux: {linux_user}"));
 
@@ -611,10 +649,9 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     let distros = distro_list::convert_from_wsl_distro_list(&raw_list);
     if !distros.iter().any(|x| x == &distro) {
         rep.say(&format!("  Instalando WSL + {distro}..."));
-        let _ = Command::new("wsl")
-            .args(["--install", "-d", &distro])
-            .status();
-        rep.say(&format!("  Nao abra o app Ubuntu: o script cria o usuario '{linux_user}' sozinho (sem digitar no instalador do Ubuntu)"));
+        rep.say(&format!("  Sem prompt duplo: o Ubuntu instala sem abrir (o usuario '{linux_user}' e criado sozinho na etapa 2)"));
+        let argv = wsl_install_argv(&distro);
+        let _ = Command::new(&argv[0]).args(&argv[1..]).status();
         std::thread::sleep(Duration::from_secs(d.fresh_install_wait_sec));
         let probe = Command::new("wsl")
             .args(["-d", &distro, "--", "true"])
@@ -1424,6 +1461,22 @@ mod tests {
             tls_cert_check_command("c"),
             "test -f c && echo OK || echo MISSING"
         );
+    }
+
+    #[test]
+    fn wsl_install_skips_oobe_with_no_launch() {
+        assert_eq!(
+            wsl_install_argv("Ubuntu"),
+            vec!["wsl", "--install", "-d", "Ubuntu", "--no-launch"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn password_retry_allows_three_attempts() {
+        assert_eq!(PASSWORD_MAX_ATTEMPTS, 3);
     }
 
     #[test]

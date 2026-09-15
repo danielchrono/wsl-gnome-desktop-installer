@@ -36,6 +36,12 @@ pub fn test_linux_user_name(name: &str) -> UserNameCheck {
     }
 }
 
+/// Confirmacao de senha: iguais E nao-vazias (vazia confirma com vazia
+/// seria "match" - por isso o `!is_empty` explicito).
+pub fn passwords_match(first: &str, second: &str) -> bool {
+    !first.is_empty() && first == second
+}
+
 fn is_valid_linux_user_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -178,5 +184,15 @@ mod tests {
         assert_eq!(resolve_user_menu_choice(1, Some("novo1"), "salvo"), "novo1");
         assert_eq!(resolve_user_menu_choice(1, Some("   "), "salvo"), "salvo");
         assert_eq!(resolve_user_menu_choice(1, None, "salvo"), "salvo");
+    }
+
+    #[test]
+    fn password_confirmation_matches_non_empty() {
+        assert!(passwords_match("abc123", "abc123"));
+        assert!(!passwords_match("abc123", "abc124"));
+        assert!(!passwords_match("abc123", ""));
+        assert!(!passwords_match("", "abc123"));
+        // Vazia confirma com vazia NAO vale (sem isso, Enter+Enter passava).
+        assert!(!passwords_match("", ""));
     }
 }
