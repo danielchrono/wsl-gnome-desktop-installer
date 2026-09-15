@@ -255,6 +255,43 @@ Describe 'Start-WslKeyringDaemon' {
   }
 }
 
+Describe 'Repair-WslKeyringBus' {
+  It 'mata estranho e reporta (sem tocar nos arquivos)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-WslRoot}
+      $script:sent = ''
+      try {
+        ${function:Invoke-WslRoot} = { param([string]$Command, [string]$Distro) $script:sent = $Command; return @{ Code = 0; Out = "estranho-99-root`nFEITO" } }
+        $r = Repair-WslKeyringBus -LinuxUser 'daniel' -Uid '1000' -Distro 'Ubuntu'
+        @($r.Repaired, ($script:sent -match 'kill'), ($script:sent -match '/run/user/1000/keyring'), ($script:sent -match 'local/share/keyrings'), ($script:sent -match '\[g\]nome'), ($script:sent -match '\$\$')) -join ','
+      } finally { ${function:Invoke-WslRoot} = $real }
+    }) | Should Be 'True,True,True,False,True,True'
+  }
+  It 'sem alvo retorna FEITO puro' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-WslRoot}
+      try {
+        ${function:Invoke-WslRoot} = { param([string]$Command, [string]$Distro) return @{ Code = 0; Out = 'FEITO' } }
+        $r = Repair-WslKeyringBus -LinuxUser 'daniel' -Uid '1000' -Distro 'Ubuntu'
+        @($r.Repaired, $r.Detail) -join ','
+      } finally { ${function:Invoke-WslRoot} = $real }
+    }) | Should Be 'False,FEITO'
+  }
+}
+
+Describe 'Fail sem eco duplicado' {
+  It 'Fail marca UBUNTUGUI_FAIL_REPORTED' {
+    (& (Get-Module UbuntuGui) {
+      $realFails = @($script:Failures); $realEnv = $env:UBUNTUGUI_FAIL_REPORTED
+      try {
+        $env:UBUNTUGUI_FAIL_REPORTED = $null
+        Fail 'x-teste' | Out-Null
+        $env:UBUNTUGUI_FAIL_REPORTED
+      } finally { $script:Failures = $realFails; $env:UBUNTUGUI_FAIL_REPORTED = $realEnv }
+    }) | Should Be '1'
+  }
+}
+
 Describe 'Get-WslUnlockPipeline' {
   It 'comando byte-identico ao unlock historico' {
     (& (Get-Module UbuntuGui) { Get-WslUnlockPipeline -PasswordQuote 'pwq' -Uid '1000' }) | Should Be "printf '%s' 'pwq' | XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus gnome-keyring-daemon --unlock 2>&1 | tail -n 3"
