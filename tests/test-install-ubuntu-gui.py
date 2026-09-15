@@ -90,6 +90,8 @@ check('launcher resolve System32 via Sysnative', 'set SYS32=' in src and 'set MS
 check('senha com retry (nao mata o run)', 'PasswordMaxAttempts' in src and 'tente de novo' in src and 'Test-PasswordConfirmation' in src)
 check('CFA: libera com permissao, atalho nunca fatal', 'ControlledFolderAccessAllowedApplications' in src and 'EnableControlledFolderAccess' in src and 'Atalhos nao criados' not in src)
 check('cert TLS confiavel no Root (sem admin)', "X509Store('Root', 'CurrentUser')" in src)
+check('cert sem unroll de bytes no construtor', '(,$tlsBytes)' in src)
+check('mstsc: tamanho e exit code diagnosticados', 'Download do mstsc suspeito' in src and 'ExitCode' in src)
 check('mstsc reinstalado sozinho quando ausente', 'linkid=2247659' in src and 'Cliente RDP (mstsc) restaurado' in src)
 check('auto-elevacao com UAC (sem bypass)', '-Verb RunAs' in src and 'Auto-elevacao' in src and 'Unattended nunca relanca' in src)
 check('limpa retomada no sucesso', 'Clear-ResumeState' in src)

@@ -1241,7 +1241,8 @@ else { Fail "RDP nao subiu"; throw "RDP nao subiu" }
 try {
   $tlsPem = (Invoke-Wsl $LinuxUser "cat $TlsCertPath 2>/dev/null").Out
   $tlsB64 = ($tlsPem -replace '-----(BEGIN|END) CERTIFICATE-----', '') -replace '\s', ''
-  $tlsCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2([Convert]::FromBase64String($tlsB64))
+  $tlsBytes = [Convert]::FromBase64String($tlsB64)
+  $tlsCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2(,$tlsBytes)
   $tlsStore = New-Object Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
   $tlsStore.Open('ReadWrite')
   try {
@@ -1272,9 +1273,13 @@ if (-not (Test-Path $mstscExe)) {
     Write-Host "  Baixando o cliente RDP oficial (mstsc)..." -ForegroundColor Yellow
     try {
       (New-Object Net.WebClient).DownloadFile($mstscUrl, $mstscSetup)
-      Start-Process -FilePath $mstscSetup -Wait
-      if (Test-Path $mstscExe) { Ok "Cliente RDP (mstsc) restaurado"; Remove-Item $mstscSetup -Force -ErrorAction SilentlyContinue }
-      else { Warn "Instalador do mstsc rodou mas o exe segue ausente ($mstscSetup guardado)" }
+      if ((Get-Item $mstscSetup).Length -lt 1MB) { Warn "Download do mstsc suspeito ($((Get-Item $mstscSetup).Length) bytes) - instale manual: $mstscUrl" }
+      else {
+        $mstscProc = Start-Process -FilePath $mstscSetup -Wait -PassThru
+        if (-not (Test-Path $mstscExe)) { Start-Sleep -Seconds 15 }
+        if (Test-Path $mstscExe) { Ok "Cliente RDP (mstsc) restaurado"; Remove-Item $mstscSetup -Force -ErrorAction SilentlyContinue }
+        else { Warn "Instalador do mstsc saiu com codigo $($mstscProc.ExitCode) mas o exe segue ausente ($mstscSetup guardado)" }
+      }
     } catch { Warn "mstsc nao restaurado ($($_.Exception.Message)) - instale manual: $mstscUrl" }
   }
 }
