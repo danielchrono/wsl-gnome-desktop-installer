@@ -42,6 +42,7 @@ check('cmd em dia com o build (nao editar a mao)', build_single.build_cmd() == d
 
 check('rdp auto-login (DPAPI+blob)', 'ProtectedData' in src and 'password 51:b:' in src)
 check('rewrite de IP no launcher', 'full address:s:' in src and 'Set-Content' in src)
+check('rewrite so quando IP muda (sem churn)', 'RDP_CUR' in src and 'if not "%RDP_CUR%"' in src)
 check('log com senha removido no sucesso', 'Remove-Item $LogFile' in src)
 check('ramo mirrored', 'networkingMode=mirrored' in src and '22621' in src)
 check('localhost fixo ou fallback', "'127.0.0.1'" in src and 'IPDISCOVERY_VAL' in src)
