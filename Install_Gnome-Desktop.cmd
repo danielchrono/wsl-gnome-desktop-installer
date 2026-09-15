@@ -15,6 +15,12 @@ if errorlevel 1 (
 )
 exit /b 0
 :RUNPS1
+rem Check for Rust executable and delegate if present
+if exist "%~dp0ubuntu-gui.exe" (
+    echo Detected Rust installer, delegating to ubuntu-gui.exe
+    "%~dp0ubuntu-gui.exe" %*
+    goto :eof
+)
 powershell -NoProfile -Command "$a=':::PS1-BODY'+'-START'; $b=':::PS1-BODY'+'-END'; $t=[IO.File]::ReadAllText('%~f0') -split $a; $u=$t[1] -split $b; [IO.File]::WriteAllText('%TEMP%\Install-UbuntuGUI.ps1',$u[0].Trim() + [char]10)"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\Install-UbuntuGUI.ps1" %*
 echo.

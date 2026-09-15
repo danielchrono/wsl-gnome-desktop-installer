@@ -71,6 +71,11 @@ $RebootDelaySec  = $D.RebootDelaySec
 $TlsDays         = $D.TlsCertDays
 $PublisherSubject = $D.PublisherSubject
 $ShellService    = $D.ShellService
+# Verifica se a porta RDP escolhida está livre; se não, usa 3390 como fallback
+if (-not (Test-NetConnection -ComputerName '127.0.0.1' -Port $RDP_PORT -InformationLevel Quiet)) {
+    Warn "Porta $RDP_PORT indisponível; usando porta alternativa 3390"
+    $RDP_PORT = 3390
+}
 $ShellBinary     = $D.ShellBinary
 $ShellRestartSec = $D.ShellRestartSec
 $RdpService      = $D.RdpService

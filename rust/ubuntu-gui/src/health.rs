@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn rdp_command_carries_service_and_port() {
         assert_eq!(
-            rdp_listening_command("r.svc", 3390),
-            "systemctl --user is-active r.svc && ss -tlnp 2>/dev/null | grep -q ':3390' && echo OK || echo DOWN"
+            rdp_listening_command("r.svc", 3389),
+            "systemctl --user is-active r.svc && ss -tlnp 2>/dev/null | grep -q ':3389' && echo OK || echo DOWN"
         );
     }
 

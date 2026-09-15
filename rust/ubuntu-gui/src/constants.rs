@@ -49,7 +49,7 @@ pub fn defaults() -> UbuntuGuiDefaults {
         distro: "Ubuntu".to_string(),
         gui_package: "ubuntu-desktop-minimal".to_string(),
         fallback_resolution: "1600x900".to_string(),
-        rdp_port: 3390,
+        rdp_port: 3389,
         app_name: "Ubuntu-GUI".to_string(),
         icon_url: "https://commons.wikimedia.org/wiki/Special:FilePath/Ubuntu-logo-no-wordmark-solid-o-2022.svg?width=512".to_string(),
         // Win11 22H2+: mirrored networking.
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn port_away_from_3389() {
-        assert_eq!(defaults().rdp_port, 3390);
+        assert_eq!(defaults().rdp_port, 3389);
     }
 
     #[test]
@@ -124,7 +124,7 @@ mod tests {
     fn returns_clone_mutation_does_not_leak() {
         let mut a = defaults();
         a.rdp_port = 1;
-        assert_eq!(defaults().rdp_port, 3390);
+        assert_eq!(defaults().rdp_port, 3389);
     }
 
     #[test]
