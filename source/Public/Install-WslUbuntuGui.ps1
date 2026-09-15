@@ -365,6 +365,8 @@ if ($r.Out -match "MISSING") {
 # Daemon no ar ANTES do PAM (o gkr-pam nao consegue subir sozinho aqui:
 # "couldn't setup credentials" no auth.log). Com ele rodando, o PAM so cria/destrava.
 $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
+$busRepair = Repair-WslKeyringBus -LinuxUser $LinuxUser -Uid $Uid -Distro $DISTRO
+if ($busRepair.Repaired) { Warn "Bus do cofre reparado ($($busRepair.Detail))" }
 if (Start-WslKeyringDaemon -LinuxUser $LinuxUser -Uid $Uid) { Ok "Daemon do cofre no ar" } else { Warn "Daemon do cofre nao respondeu - PAM tenta subir sozinho" }
 # Cofre login via PAM do sudo (cria com a senha do usuario; revertido em seguida).
 # O tee recebe SENHA + CONTEUDO no mesmo stdin: o sudo consome a 1a linha, o resto anexa.
@@ -374,7 +376,7 @@ if ($r.Out -match "MISSING") {
   Invoke-Wsl $LinuxUser "$pamAdd && printf '%s\n' '$PWQ' | sudo -S true && printf '%s\n' '$PWQ' | sudo -S sed -i '/pam_gnome_keyring.so/d' $PamSudoPath" | Out-Null
 }
 $r = Invoke-Wsl $LinuxUser "test -f $KeyringPath && echo OK || echo MISSING"
-if ($r.Out -match "OK") { Ok "Cofre login pronto" } else { Fail "Cofre nao criado"; throw "Cofre nao criado" }
+if ($r.Out -match "OK") { Ok "Cofre login pronto" } else { Fail "Cofre nao criado (o PAM via sudo nao criou sozinho: confira ~/.local/share/keyrings/login.keyring e backups *.bak* - sem o arquivo nenhum unlock funciona)"; throw "Cofre nao criado" }
 if ((Invoke-Wsl $LinuxUser "grep -c pam_gnome_keyring $PamSudoPath 2>/dev/null").Out.Trim() -ne "0") {
   Fail "/etc/pam.d/sudo nao voltou ao original - verifique"; throw "PAM adulterado"
 }
@@ -393,7 +395,7 @@ $pamUnlocked = Test-WslKeyringUnlocked -LinuxUser $LinuxUser -Uid $Uid
 if ($pamUnlocked) { Ok "Cofre ja destravado via PAM (pulando unlock)" }
 $uk = if ($pamUnlocked) { @{ UnlockCode = 0; State = 'Unlocked'; Probe = 'via PAM'; UnlockText = '(via PAM)' } } else { UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid }
 if ($uk.UnlockCode -ne 0) {
-  Fail "Cofre nao desbloqueou com a senha informada ($($uk.UnlockText)) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+  Fail "Cofre nao desbloqueou com a senha informada ($($uk.UnlockText)) - cofre de outro run? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo o PAM nao recria sozinho)"
   throw "Cofre bloqueado"
 }
 # Sonda sem prompt antes de gravar: trancado = set-credentials travaria ate o
@@ -404,13 +406,17 @@ if ($uk.State -ne 'Unlocked') {
   Start-Sleep -Seconds $KeyringReprobeSec
   $uk2 = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
   if ($uk2.State -eq 'Unlocked') { Ok "Cofre destravou na re-sonda" }
+  elseif ($uk2.State -eq 'Missing') {
+    Fail "Colecao login ausente (daemon responde mas sem colecao: arquivo ~/.local/share/keyrings/login.keyring sumiu ou daemon anterior a ele - retorno: $($uk2.Probe)) - restaure um backup *.bak* para login.keyring (com cp, sem apagar o backup) e rode de novo"
+    throw "Cofre ausente"
+  }
   elseif ($uk2.State -eq 'Error') {
     Fail "Sonda do cofre falhou (nao e 'trancado': D-Bus/sessao?) - retorno: $($uk2.Probe) - unlock disse: $($uk2.UnlockText) - tente 'wsl --shutdown' e rode de novo"
     throw "Cofre bloqueado"
   } else {
     $lockDetail = Get-WslKeyringLockDetail -LinuxUser $LinuxUser -Uid $Uid
     if (Test-WslUnlockExitMeaningful -LinuxUser $LinuxUser -Uid $Uid) {
-      Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo com UMA senha definitiva"
+      Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo o PAM nao recria sozinho)"
     } else {
       Fail "Unlock por stdin nao destrava neste sistema (gnome-keyring 50: senha falsa tambem sai 0 e recriar via PAM tambem fica trancado; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo. So em ultimo caso, com backup: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak e rode de novo"
     }
@@ -433,7 +439,7 @@ for ($i = 1; $i -le $CredRetries -and -not $stored; $i++) {
   else { Write-Host " ainda nao ($([int]$sw.Elapsed.TotalSeconds)s): $($gc.Out.Trim())" -ForegroundColor Yellow }
 }
 if (-not $stored) {
-  Fail "Credencial RDP nao gravou no cofre (ultima saida: $($gc.Out.Trim()) - cofre trancado com outra senha? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo)"
+  Fail "Credencial RDP nao gravou no cofre (ultima saida: $($gc.Out.Trim()) - cofre trancado com outra senha? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo (nunca rm: sem o arquivo o PAM nao recria sozinho))"
   throw "Credencial nao gravada"
 }
 Ok "Credencial RDP gravada"

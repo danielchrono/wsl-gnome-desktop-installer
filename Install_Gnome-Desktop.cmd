@@ -64,7 +64,7 @@ $script:Failures = @()
 function Step([string]$msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok([string]$msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "  [AVISO] $msg" -ForegroundColor Yellow }
-function Fail([string]$msg) { Write-Host "  [FALHA] $msg" -ForegroundColor Red; $script:Failures += $msg }
+function Fail([string]$msg) { Write-Host "  [FALHA] $msg" -ForegroundColor Red; $script:Failures += $msg; $env:UBUNTUGUI_FAIL_REPORTED = '1' }
 
 # Estado explicito (FP): hashtable imutavel por copia. Novo codigo prefere estas.
 function New-UbuntuGuiFeedbackState {
@@ -131,6 +131,19 @@ function Get-WslKeyringProbeCommand([string]$Uid) {
   return "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked 2>&1"
 }
 
+# Limpeza cirurgica do bus do cofre (via root, que enxerga todos os donos).
+# Mata (a) daemons de OUTRO dono (o PAM recusa socket alheio) e (b) orfaos
+# '--unlock' (nascem de unlock sem daemon, nao servem direito, mas ocupam o
+# bus e fazem o --start ceder). NUNCA toca num daemon '--start' do proprio
+# usuario nem nos arquivos do cofre. '[g]...' evita o pgrep se achar; o
+# '$$' evita suicidio. Sem alvo, nao faz nada (FEITO puro).
+function Repair-WslKeyringBus([string]$LinuxUser, [string]$Uid, [string]$Distro) {
+  $cmd = "for p in `$(pgrep -f '[g]nome-keyring-daemon' 2>/dev/null); do if [ `"`$p`" = `"`$`$`" ]; then continue; fi; ou=`$(stat -c %U /proc/`$p 2>/dev/null || echo GONE); args=`$(tr '\0' ' ' </proc/`$p/cmdline 2>/dev/null); case `"`$ou`" in `"$LinuxUser`") case `"`$args`" in *--unlock*) kill `$p 2>/dev/null && echo `"orfao-`$p`";; esac;; *) kill `$p 2>/dev/null && echo `"estranho-`$p`-`$ou`";; esac; done; if [ -d /run/user/$Uid/keyring ] && [ -n `"`$(find /run/user/$Uid/keyring -not -user $LinuxUser 2>/dev/null)`" ]; then rm -rf /run/user/$Uid/keyring; echo SOCKETS-LIMPOS; fi; echo FEITO"
+  $r = Invoke-WslRoot $cmd -Distro $Distro
+  $out = if ($r.Out) { $r.Out.Trim() } else { '' }
+  return @{ Repaired = [bool]($out -match 'orfao-|estranho-|SOCKETS-LIMPOS'); Detail = $out }
+}
+
 # Sobe o daemon como o proprio usuario ANTES do PAM: o gkr-pam falha ao
 # inicia-lo sozinho ("couldn't setup credentials: Operation not permitted" no
 # auth.log). Idempotente (--start com daemon rodando = no-op). Retorna $true
@@ -177,6 +190,7 @@ function UnlockAndProbe-WslKeyring([string]$LinuxUser, [string]$PasswordQuote, [
   if ($parsed.UnlockCode -lt 0 -or [string]::IsNullOrWhiteSpace($parsed.Probe)) { $state = 'Error' }
   elseif (Test-UnlockedPropertyOutput -Out $parsed.Probe) { $state = 'Unlocked' }
   elseif ($parsed.Probe -match 'b true') { $state = 'Locked' }
+  elseif (Test-MissingCollectionOutput -Out $parsed.Probe) { $state = 'Missing' }
   else { $state = 'Error' }
   $ut = ((($r.Out -split "`n") | Where-Object { $_ -notmatch '^UBUNTUGUI_' }) -join "`n").Trim()
   if ([string]::IsNullOrWhiteSpace($ut)) { $ut = '(vazio)' }
@@ -202,16 +216,31 @@ function Test-UnlockedPropertyOutput([string]$Out) {
   return ($Out -match 'b false')
 }
 
-# Estado da sonda do cofre: Locked vs Unlocked vs Error. Fail-closed como
-# antes (so 'b false' prova destravado), mas sem confundir 'trancado' com
-# 'sonda quebrou': 'b true' = trancado de verdade; qualquer outra saida (bus
-# fora, alias ausente) = Error, que pede outro conserto (D-Bus/sessao, nao
-# apagar o keyring). 2>&1 de proposito: o texto do erro e o diagnostico.
+# Colecao login ausente: o daemon RESPONDEU mas nao expoe a colecao (o arquivo
+# login.keyring nao existe no disco ou o daemon e anterior a ele). Textos
+# observados ao vivo: "Unknown object '/org/.../aliases/default'" (busctl) e
+# "Object does not exist at path .../collection/login" (resposta do proprio
+# daemon). Fail-closed: qualquer outro texto nao e Missing.
+function Test-MissingCollectionOutput([string]$Out) {
+  if ([string]::IsNullOrWhiteSpace($Out)) { return $false }
+  if ($Out -match 'Unknown object .*/aliases/default') { return $true }
+  if ($Out -match 'Object does not exist at path' -and $Out -match 'collection/login') { return $true }
+  return $false
+}
+
+# Estado da sonda do cofre: Locked vs Unlocked vs Missing vs Error. Fail-closed
+# como antes (so 'b false' prova destravado), mas sem confundir 'trancado' com
+# 'sonda quebrou' nem com 'cofre sumiu': 'b true' = trancado de verdade;
+# Missing = daemon no ar sem colecao login (arquivo ausente/daemon velho -
+# pede restaurar backup, nao mexer no D-Bus); qualquer outra saida (bus fora)
+# = Error, que pede outro conserto (D-Bus/sessao, nao apagar o keyring).
+# 2>&1 de proposito: o texto do erro e o diagnostico.
 function Get-WslKeyringProbeState([string]$LinuxUser, [string]$Uid) {
   $r = Invoke-Wsl $LinuxUser (Get-WslKeyringProbeCommand -Uid $Uid)
   $out = if ($r.Out) { $r.Out.Trim() } else { '' }
   if (Test-UnlockedPropertyOutput -Out $out) { return @{ State = 'Unlocked'; Out = $out } }
   if ($out -match 'b true') { return @{ State = 'Locked'; Out = $out } }
+  if (Test-MissingCollectionOutput -Out $out) { return @{ State = 'Missing'; Out = $out } }
   return @{ State = 'Error'; Out = $out }
 }
 
@@ -242,7 +271,7 @@ function Get-WslKeyringLockDetail([string]$LinuxUser, [string]$Uid) {
   $envPrefix = New-WslSessionEnv -Uid $Uid
   $login = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login org.freedesktop.Secret.Collection Locked 2>&1"
   $files = Invoke-Wsl $LinuxUser "ls ~/.local/share/keyrings/ 2>/dev/null || echo SEM-DIR"
-  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -fc 'gnome-keyring-daemon' 2>/dev/null); echo daemons=`$daemons"
+  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -fc '[g]nome-keyring-daemon' 2>/dev/null); echo daemons=`$daemons"
   $loginOut = if ($login.Out) { $login.Out.Trim() } else { '(vazio)' }
   $filesOut = if ($files.Out) { $files.Out.Trim() } else { '(vazio)' }
   $daemonOut = if ($daemons.Out) { $daemons.Out.Trim() } else { '(vazio)' }
@@ -959,6 +988,8 @@ if ($r.Out -match "MISSING") {
 # Daemon no ar ANTES do PAM (o gkr-pam nao consegue subir sozinho aqui:
 # "couldn't setup credentials" no auth.log). Com ele rodando, o PAM so cria/destrava.
 $Uid = (Invoke-Wsl $LinuxUser "id -u").Out.Trim()
+$busRepair = Repair-WslKeyringBus -LinuxUser $LinuxUser -Uid $Uid -Distro $DISTRO
+if ($busRepair.Repaired) { Warn "Bus do cofre reparado ($($busRepair.Detail))" }
 if (Start-WslKeyringDaemon -LinuxUser $LinuxUser -Uid $Uid) { Ok "Daemon do cofre no ar" } else { Warn "Daemon do cofre nao respondeu - PAM tenta subir sozinho" }
 # Cofre login via PAM do sudo (cria com a senha do usuario; revertido em seguida).
 # O tee recebe SENHA + CONTEUDO no mesmo stdin: o sudo consome a 1a linha, o resto anexa.
@@ -968,7 +999,7 @@ if ($r.Out -match "MISSING") {
   Invoke-Wsl $LinuxUser "$pamAdd && printf '%s\n' '$PWQ' | sudo -S true && printf '%s\n' '$PWQ' | sudo -S sed -i '/pam_gnome_keyring.so/d' $PamSudoPath" | Out-Null
 }
 $r = Invoke-Wsl $LinuxUser "test -f $KeyringPath && echo OK || echo MISSING"
-if ($r.Out -match "OK") { Ok "Cofre login pronto" } else { Fail "Cofre nao criado"; throw "Cofre nao criado" }
+if ($r.Out -match "OK") { Ok "Cofre login pronto" } else { Fail "Cofre nao criado (o PAM via sudo nao criou sozinho: confira ~/.local/share/keyrings/login.keyring e backups *.bak* - sem o arquivo nenhum unlock funciona)"; throw "Cofre nao criado" }
 if ((Invoke-Wsl $LinuxUser "grep -c pam_gnome_keyring $PamSudoPath 2>/dev/null").Out.Trim() -ne "0") {
   Fail "/etc/pam.d/sudo nao voltou ao original - verifique"; throw "PAM adulterado"
 }
@@ -987,7 +1018,7 @@ $pamUnlocked = Test-WslKeyringUnlocked -LinuxUser $LinuxUser -Uid $Uid
 if ($pamUnlocked) { Ok "Cofre ja destravado via PAM (pulando unlock)" }
 $uk = if ($pamUnlocked) { @{ UnlockCode = 0; State = 'Unlocked'; Probe = 'via PAM'; UnlockText = '(via PAM)' } } else { UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid }
 if ($uk.UnlockCode -ne 0) {
-  Fail "Cofre nao desbloqueou com a senha informada ($($uk.UnlockText)) - cofre de outro run? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo"
+  Fail "Cofre nao desbloqueou com a senha informada ($($uk.UnlockText)) - cofre de outro run? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo o PAM nao recria sozinho)"
   throw "Cofre bloqueado"
 }
 # Sonda sem prompt antes de gravar: trancado = set-credentials travaria ate o
@@ -998,13 +1029,17 @@ if ($uk.State -ne 'Unlocked') {
   Start-Sleep -Seconds $KeyringReprobeSec
   $uk2 = UnlockAndProbe-WslKeyring -LinuxUser $LinuxUser -PasswordQuote $PWQ -Uid $Uid
   if ($uk2.State -eq 'Unlocked') { Ok "Cofre destravou na re-sonda" }
+  elseif ($uk2.State -eq 'Missing') {
+    Fail "Colecao login ausente (daemon responde mas sem colecao: arquivo ~/.local/share/keyrings/login.keyring sumiu ou daemon anterior a ele - retorno: $($uk2.Probe)) - restaure um backup *.bak* para login.keyring (com cp, sem apagar o backup) e rode de novo"
+    throw "Cofre ausente"
+  }
   elseif ($uk2.State -eq 'Error') {
     Fail "Sonda do cofre falhou (nao e 'trancado': D-Bus/sessao?) - retorno: $($uk2.Probe) - unlock disse: $($uk2.UnlockText) - tente 'wsl --shutdown' e rode de novo"
     throw "Cofre bloqueado"
   } else {
     $lockDetail = Get-WslKeyringLockDetail -LinuxUser $LinuxUser -Uid $Uid
     if (Test-WslUnlockExitMeaningful -LinuxUser $LinuxUser -Uid $Uid) {
-      Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo com UMA senha definitiva"
+      Fail "Senha incorreta para o cofre existente (teste de controle com senha falsa foi rejeitado; unlock disse: $($uk2.UnlockText); $lockDetail) - No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo com UMA senha definitiva (nunca rm: sem o arquivo o PAM nao recria sozinho)"
     } else {
       Fail "Unlock por stdin nao destrava neste sistema (gnome-keyring 50: senha falsa tambem sai 0 e recriar via PAM tambem fica trancado; $lockDetail) - destrave uma vez via Senhas e chaves (seahorse), mantenha ABERTO e rode de novo. So em ultimo caso, com backup: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak e rode de novo"
     }
@@ -1027,7 +1062,7 @@ for ($i = 1; $i -le $CredRetries -and -not $stored; $i++) {
   else { Write-Host " ainda nao ($([int]$sw.Elapsed.TotalSeconds)s): $($gc.Out.Trim())" -ForegroundColor Yellow }
 }
 if (-not $stored) {
-  Fail "Credencial RDP nao gravou no cofre (ultima saida: $($gc.Out.Trim()) - cofre trancado com outra senha? No Ubuntu: rm ~/.local/share/keyrings/login.keyring e rode de novo)"
+  Fail "Credencial RDP nao gravou no cofre (ultima saida: $($gc.Out.Trim()) - cofre trancado com outra senha? No Ubuntu, COM BACKUP: mv ~/.local/share/keyrings/login.keyring ~/login.keyring.bak-UMA-SENHA && rode de novo (nunca rm: sem o arquivo o PAM nao recria sozinho))"
   throw "Credencial nao gravada"
 }
 Ok "Credencial RDP gravada"
@@ -1182,7 +1217,9 @@ try {
   Install-WslUbuntuGui -Resume:$Resume
   exit 0
 } catch {
-  Write-Host "FALHA: $($_.Exception.Message)" -ForegroundColor Red
+  # Sem eco duplicado: falha controlada ja imprimiu [FALHA] com detalhe.
+  if ($env:UBUNTUGUI_FAIL_REPORTED) { Write-Host "FALHA (detalhes acima)" -ForegroundColor Red }
+  else { Write-Host "FALHA: $($_.Exception.Message)" -ForegroundColor Red }
   exit 1
 } finally {
   try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}

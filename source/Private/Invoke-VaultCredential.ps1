@@ -21,6 +21,19 @@ function Get-WslKeyringProbeCommand([string]$Uid) {
   return "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked 2>&1"
 }
 
+# Limpeza cirurgica do bus do cofre (via root, que enxerga todos os donos).
+# Mata (a) daemons de OUTRO dono (o PAM recusa socket alheio) e (b) orfaos
+# '--unlock' (nascem de unlock sem daemon, nao servem direito, mas ocupam o
+# bus e fazem o --start ceder). NUNCA toca num daemon '--start' do proprio
+# usuario nem nos arquivos do cofre. '[g]...' evita o pgrep se achar; o
+# '$$' evita suicidio. Sem alvo, nao faz nada (FEITO puro).
+function Repair-WslKeyringBus([string]$LinuxUser, [string]$Uid, [string]$Distro) {
+  $cmd = "for p in `$(pgrep -f '[g]nome-keyring-daemon' 2>/dev/null); do if [ `"`$p`" = `"`$`$`" ]; then continue; fi; ou=`$(stat -c %U /proc/`$p 2>/dev/null || echo GONE); args=`$(tr '\0' ' ' </proc/`$p/cmdline 2>/dev/null); case `"`$ou`" in `"$LinuxUser`") case `"`$args`" in *--unlock*) kill `$p 2>/dev/null && echo `"orfao-`$p`";; esac;; *) kill `$p 2>/dev/null && echo `"estranho-`$p`-`$ou`";; esac; done; if [ -d /run/user/$Uid/keyring ] && [ -n `"`$(find /run/user/$Uid/keyring -not -user $LinuxUser 2>/dev/null)`" ]; then rm -rf /run/user/$Uid/keyring; echo SOCKETS-LIMPOS; fi; echo FEITO"
+  $r = Invoke-WslRoot $cmd -Distro $Distro
+  $out = if ($r.Out) { $r.Out.Trim() } else { '' }
+  return @{ Repaired = [bool]($out -match 'orfao-|estranho-|SOCKETS-LIMPOS'); Detail = $out }
+}
+
 # Sobe o daemon como o proprio usuario ANTES do PAM: o gkr-pam falha ao
 # inicia-lo sozinho ("couldn't setup credentials: Operation not permitted" no
 # auth.log). Idempotente (--start com daemon rodando = no-op). Retorna $true
@@ -67,6 +80,7 @@ function UnlockAndProbe-WslKeyring([string]$LinuxUser, [string]$PasswordQuote, [
   if ($parsed.UnlockCode -lt 0 -or [string]::IsNullOrWhiteSpace($parsed.Probe)) { $state = 'Error' }
   elseif (Test-UnlockedPropertyOutput -Out $parsed.Probe) { $state = 'Unlocked' }
   elseif ($parsed.Probe -match 'b true') { $state = 'Locked' }
+  elseif (Test-MissingCollectionOutput -Out $parsed.Probe) { $state = 'Missing' }
   else { $state = 'Error' }
   $ut = ((($r.Out -split "`n") | Where-Object { $_ -notmatch '^UBUNTUGUI_' }) -join "`n").Trim()
   if ([string]::IsNullOrWhiteSpace($ut)) { $ut = '(vazio)' }
@@ -92,16 +106,31 @@ function Test-UnlockedPropertyOutput([string]$Out) {
   return ($Out -match 'b false')
 }
 
-# Estado da sonda do cofre: Locked vs Unlocked vs Error. Fail-closed como
-# antes (so 'b false' prova destravado), mas sem confundir 'trancado' com
-# 'sonda quebrou': 'b true' = trancado de verdade; qualquer outra saida (bus
-# fora, alias ausente) = Error, que pede outro conserto (D-Bus/sessao, nao
-# apagar o keyring). 2>&1 de proposito: o texto do erro e o diagnostico.
+# Colecao login ausente: o daemon RESPONDEU mas nao expoe a colecao (o arquivo
+# login.keyring nao existe no disco ou o daemon e anterior a ele). Textos
+# observados ao vivo: "Unknown object '/org/.../aliases/default'" (busctl) e
+# "Object does not exist at path .../collection/login" (resposta do proprio
+# daemon). Fail-closed: qualquer outro texto nao e Missing.
+function Test-MissingCollectionOutput([string]$Out) {
+  if ([string]::IsNullOrWhiteSpace($Out)) { return $false }
+  if ($Out -match 'Unknown object .*/aliases/default') { return $true }
+  if ($Out -match 'Object does not exist at path' -and $Out -match 'collection/login') { return $true }
+  return $false
+}
+
+# Estado da sonda do cofre: Locked vs Unlocked vs Missing vs Error. Fail-closed
+# como antes (so 'b false' prova destravado), mas sem confundir 'trancado' com
+# 'sonda quebrou' nem com 'cofre sumiu': 'b true' = trancado de verdade;
+# Missing = daemon no ar sem colecao login (arquivo ausente/daemon velho -
+# pede restaurar backup, nao mexer no D-Bus); qualquer outra saida (bus fora)
+# = Error, que pede outro conserto (D-Bus/sessao, nao apagar o keyring).
+# 2>&1 de proposito: o texto do erro e o diagnostico.
 function Get-WslKeyringProbeState([string]$LinuxUser, [string]$Uid) {
   $r = Invoke-Wsl $LinuxUser (Get-WslKeyringProbeCommand -Uid $Uid)
   $out = if ($r.Out) { $r.Out.Trim() } else { '' }
   if (Test-UnlockedPropertyOutput -Out $out) { return @{ State = 'Unlocked'; Out = $out } }
   if ($out -match 'b true') { return @{ State = 'Locked'; Out = $out } }
+  if (Test-MissingCollectionOutput -Out $out) { return @{ State = 'Missing'; Out = $out } }
   return @{ State = 'Error'; Out = $out }
 }
 
@@ -132,7 +161,7 @@ function Get-WslKeyringLockDetail([string]$LinuxUser, [string]$Uid) {
   $envPrefix = New-WslSessionEnv -Uid $Uid
   $login = Invoke-Wsl $LinuxUser "$envPrefix busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login org.freedesktop.Secret.Collection Locked 2>&1"
   $files = Invoke-Wsl $LinuxUser "ls ~/.local/share/keyrings/ 2>/dev/null || echo SEM-DIR"
-  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -fc 'gnome-keyring-daemon' 2>/dev/null); echo daemons=`$daemons"
+  $daemons = Invoke-Wsl $LinuxUser "daemons=`$(pgrep -fc '[g]nome-keyring-daemon' 2>/dev/null); echo daemons=`$daemons"
   $loginOut = if ($login.Out) { $login.Out.Trim() } else { '(vazio)' }
   $filesOut = if ($files.Out) { $files.Out.Trim() } else { '(vazio)' }
   $daemonOut = if ($daemons.Out) { $daemons.Out.Trim() } else { '(vazio)' }

@@ -127,6 +127,20 @@ Describe 'Test-UnlockedPropertyOutput' {
   }
 }
 
+Describe 'Test-MissingCollectionOutput' {
+  It 'alias default ausente e Missing (texto busctl ao vivo)' {
+    (& (Get-Module UbuntuGui) { Test-MissingCollectionOutput -Out "Failed to get property Locked on interface org.freedesktop.Secret.Collection: Unknown object '/org/freedesktop/secrets/aliases/default'." }) | Should Be $true
+  }
+  It 'colecao login ausente e Missing (resposta do daemon ao vivo)' {
+    (& (Get-Module UbuntuGui) { Test-MissingCollectionOutput -Out 'Failed to get property Locked on interface org.freedesktop.Secret.Collection: Object does not exist at path “/org/freedesktop/secrets/collection/login”' }) | Should Be $true
+  }
+  It 'trancado/destravado/vazio/bus-fora nao sao Missing (fail-closed)' {
+    (& (Get-Module UbuntuGui) {
+      @((Test-MissingCollectionOutput -Out 'b true'), (Test-MissingCollectionOutput -Out 'b false'), (Test-MissingCollectionOutput -Out ''), (Test-MissingCollectionOutput -Out 'Failed to connect to bus: No such file')) -join ','
+    }) | Should Be 'False,False,False,False'
+  }
+}
+
 Describe 'New-WslSessionEnv' {
   It 'monta XDG e bus da sessao' {
     (& (Get-Module UbuntuGui) { New-WslSessionEnv -Uid '1000' }) | Should Be 'XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus'
@@ -170,6 +184,15 @@ Describe 'Get-WslKeyringProbeState' {
         (Get-WslKeyringProbeState -LinuxUser 'u' -Uid '1000').State
       } finally { ${function:Invoke-Wsl} = $real }
     }) | Should Be 'Error'
+  }
+  It 'classifica daemon sem colecao login como Missing (nao Error)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command) return @{ Code = 1; Out = "Unknown object '/org/freedesktop/secrets/aliases/default'." } }
+        (Get-WslKeyringProbeState -LinuxUser 'u' -Uid '1000').State
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be 'Missing'
   }
   It 're-sonda limitada a 5s (tunable)' {
     (& (Get-Module UbuntuGui) { (Get-UbuntuGuiDefaults).KeyringReprobeSec }) | Should Be 5
@@ -252,6 +275,20 @@ Describe 'Start-WslKeyringDaemon' {
         @($r, $script:sleeps) -join ','
       } finally { ${function:Invoke-Wsl} = $realWsl; ${function:Start-Sleep} = $realSleep }
     }) | Should Be 'False,10'
+  }
+  It 'daemon sem colecao conta como no ar (Missing responde)' {
+    (& (Get-Module UbuntuGui) {
+      $realWsl = ${function:Invoke-Wsl}; $realSleep = ${function:Start-Sleep}
+      $script:sleeps = 0
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          if ($Command -match 'get-property') { return @{ Code = 1; Out = "Unknown object '/org/freedesktop/secrets/aliases/default'." } }
+          return @{ Code = 0; Out = '' } }
+        ${function:Start-Sleep} = { param([int]$Seconds) $script:sleeps++ }
+        $r = Start-WslKeyringDaemon -LinuxUser 'u' -Uid '1000'
+        @($r, $script:sleeps) -join ','
+      } finally { ${function:Invoke-Wsl} = $realWsl; ${function:Start-Sleep} = $realSleep }
+    }) | Should Be 'True,0'
   }
 }
 
@@ -337,6 +374,17 @@ Describe 'UnlockAndProbe-WslKeyring' {
         @($r.UnlockCode, $r.State) -join ','
       } finally { ${function:Invoke-Wsl} = $real }
     }) | Should Be '0,Unlocked'
+  }
+  It 'mapeia sonda sem colecao para Missing (nao Error)' {
+    (& (Get-Module UbuntuGui) {
+      $real = ${function:Invoke-Wsl}
+      try {
+        ${function:Invoke-Wsl} = { param([string]$AsUser, [string]$Command)
+          return @{ Code = 0; Out = "UBUNTUGUI_UNLOCKCODE=0`nUBUNTUGUI_PROBE=Object does not exist at path /org/freedesktop/secrets/collection/login" } }
+        $r = UnlockAndProbe-WslKeyring -LinuxUser 'u' -PasswordQuote 'pwq' -Uid '1000'
+        @($r.UnlockCode, $r.State) -join ','
+      } finally { ${function:Invoke-Wsl} = $real }
+    }) | Should Be '0,Missing'
   }
 }
 
