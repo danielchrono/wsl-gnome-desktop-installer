@@ -150,15 +150,28 @@ fn main() {
 
     // tail: `exit 0` no sucesso; etapa 1 com reboot sai 0 + sentinela
     // (RunOnce ja escrito); `FALHA: <msg>` + `exit 1` no erro.
+    // A trava segura o console em TODAS as saidas do install (sem ela a
+    // janela fecha sozinha e o log voa); `status` nao trava (saida legivel
+    // por maquina, pode estar num script com TTY).
     match ubuntu_gui::install::run_install(&opts) {
-        Ok(ubuntu_gui::install::InstallOutcome::Done) => std::process::exit(0),
+        Ok(ubuntu_gui::install::InstallOutcome::Done) => exit_install(0, opts.unattended),
         Ok(ubuntu_gui::install::InstallOutcome::RebootRequired) => {
             println!("{REBOOT_SENTINEL}");
-            std::process::exit(0);
+            exit_install(0, opts.unattended);
         }
         Err(e) => {
             eprintln!("FALHA: {e}");
-            std::process::exit(1);
+            exit_install(1, opts.unattended);
         }
     }
+}
+
+/// Saida do install com trava "pressione qualquer tecla" quando ha terminal
+/// interativo (nunca no `--unattended`: automacao nao pode parar).
+fn exit_install(code: i32, unattended: bool) -> ! {
+    use std::io::IsTerminal;
+    if ubuntu_gui::tui::should_hold_console(unattended, std::io::stdin().is_terminal()) {
+        ubuntu_gui::tui::hold_console();
+    }
+    std::process::exit(code);
 }

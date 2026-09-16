@@ -69,6 +69,7 @@ check('rdp acompanha a janela (dynamic resolution)', "'dynamic resolution:i:1'" 
 check('rdp com zoom p/ janela (smart sizing, sem scroll)', "'smart sizing:i:1'" in src)
 check('resolucao usa a area util (sem barra de rolagem no maximizado)', 'WorkingArea' in src and 'PrimaryScreen.Bounds' not in src)
 check('rdp redireciona USB do host', "'usbdevicestoredirect:s:*'" in src)
+check('rdp redireciona PnP do host (Recursos Locais)', "'devicestoredirect:s:*'" in src)
 check('login sem aviso via Cofre do Windows (TERMSRV)', 'CredWriteW' in src and 'TERMSRV/' in src and 'Unprotect' in src and '-Cred.ps1' in src)
 check('launcher prefere mstsc sem arquivo (fallback preservado)', 'CREDHELPER' in src and '/v:%WSL_IP%:RDP_PORT_VAL' in src and '"%RDPPATH%"' in src)
 check('launcher abre mstsc no tamanho pedido (/w /h)', '/w:RDP_W_VAL' in src and '/h:RDP_H_VAL' in src and 'RdpWidth' in src)

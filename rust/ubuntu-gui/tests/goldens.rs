@@ -18,6 +18,7 @@ fn rdp_line_order_golden() {
         "smart sizing:i:1",
         "dynamic resolution:i:1",
         "usbdevicestoredirect:s:*",
+        "devicestoredirect:s:*",
         "desktopwidth:i:1600",
         "desktopheight:i:900",
         "full address:s:127.0.0.1:3390",

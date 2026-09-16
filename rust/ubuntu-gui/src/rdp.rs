@@ -31,6 +31,9 @@ pub fn new_rdp_file_content(
         "dynamic resolution:i:1".to_string(),
         // USB do host na sessao (paridade com o PS).
         "usbdevicestoredirect:s:*".to_string(),
+        // PnP do host (Recursos Locais > Mais; o servidor/GNOME pode recusar
+        // algumas classes, como no USB).
+        "devicestoredirect:s:*".to_string(),
     ];
     if let Some((w, h)) = split_resolution(resolution) {
         rdp.push(format!("desktopwidth:i:{w}"));
@@ -120,28 +123,87 @@ pub fn rdp_has_signature(bytes: &[u8]) -> bool {
     filtered.windows(needle.len()).any(|w| w == needle)
 }
 
+/// Resultado da assinatura (o log diz o MOTIVO, nao so "falhou").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignOutcome {
+    Signed,
+    /// Binario ausente (SKU sem rdpsign, etc. — paridade com o PS, que pula
+    /// com aviso proprio em vez de "falhou").
+    NoBinary,
+    Failed(String),
+}
+
+/// Candidatos ao `rdpsign.exe` em ordem (paridade com o PS): `System32` e
+/// `Sysnative` (p/ host 32-bit vendo SysWOW64).
+pub fn rdpsign_candidates(system_root: &str) -> Vec<std::path::PathBuf> {
+    ["System32", "Sysnative"]
+        .iter()
+        .map(|d| std::path::PathBuf::from(format!("{system_root}\\{d}\\rdpsign.exe")))
+        .collect()
+}
+
+/// Primeiro candidato existente.
+#[cfg(windows)]
+pub fn find_rdpsign(system_root: &str) -> Option<std::path::PathBuf> {
+    rdpsign_candidates(system_root)
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+/// Motivo legivel da falha: primeira linha nao vazia do stderr (senao stdout);
+/// sem nada, o codigo de saida. Truncado para caber no warn de uma linha.
+pub fn sign_failure_reason(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let text_out = String::from_utf8_lossy(stdout);
+    let line = line.or_else(|| text_out.lines().map(str::trim).find(|l| !l.is_empty()));
+    match line {
+        Some(l) => {
+            let mut s: String = l.chars().take(160).collect();
+            if l.chars().count() > 160 {
+                s.push('…');
+            }
+            s
+        }
+        None => match code {
+            Some(c) => format!("codigo de saida {c} sem mensagem"),
+            None => "sem codigo de saida nem mensagem".to_string(),
+        },
+    }
+}
+
 /// Assina o `.rdp` com `rdpsign.exe /sha256` (warn-only se falhar, como no
 /// PowerShell: o aviso de fornecedor pode continuar, nao e fatal).
 #[cfg(windows)]
-pub fn sign_rdp_file(rdp_path: &std::path::Path, thumbprint: &str) -> bool {
+pub fn sign_rdp_file(rdp_path: &std::path::Path, thumbprint: &str) -> SignOutcome {
     use std::process::Command;
 
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let rdpsign = format!("{system_root}\\System32\\rdpsign.exe");
-    let status = Command::new(&rdpsign)
+    let Some(rdpsign) = find_rdpsign(&system_root) else {
+        return SignOutcome::NoBinary;
+    };
+    match Command::new(&rdpsign)
         .args(["/sha256", thumbprint, &rdp_path.to_string_lossy()])
-        .status();
-    match status {
-        Ok(s) if s.success() => std::fs::read(rdp_path)
-            .map(|b| rdp_has_signature(&b))
-            .unwrap_or(false),
-        _ => false,
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            let signed = std::fs::read(rdp_path)
+                .map(|b| rdp_has_signature(&b))
+                .unwrap_or(false);
+            if signed {
+                SignOutcome::Signed
+            } else {
+                SignOutcome::Failed("rdpsign saiu 0 mas sem assinatura no arquivo".to_string())
+            }
+        }
+        Ok(o) => SignOutcome::Failed(sign_failure_reason(o.status.code(), &o.stdout, &o.stderr)),
+        Err(e) => SignOutcome::Failed(format!("nao executei o rdpsign: {e}")),
     }
 }
 
 #[cfg(not(windows))]
-pub fn sign_rdp_file(_rdp_path: &std::path::Path, _thumbprint: &str) -> bool {
-    false
+pub fn sign_rdp_file(_rdp_path: &std::path::Path, _thumbprint: &str) -> SignOutcome {
+    SignOutcome::NoBinary
 }
 
 #[cfg(test)]
@@ -196,6 +258,7 @@ mod tests {
                 "smart sizing:i:1",
                 "dynamic resolution:i:1",
                 "usbdevicestoredirect:s:*",
+                "devicestoredirect:s:*",
                 "desktopwidth:i:1600",
                 "desktopheight:i:900",
                 "full address:s:127.0.0.1:3390",
@@ -239,6 +302,50 @@ mod tests {
         assert!(rdp_has_signature(&wide));
         assert!(!rdp_has_signature(b"full address:s:x\n"));
         assert!(!rdp_has_signature(&[]));
+    }
+
+    #[test]
+    fn rdpsign_candidates_try_system32_then_sysnative() {
+        let c = rdpsign_candidates(r"C:\Windows");
+        assert_eq!(c.len(), 2);
+        assert_eq!(
+            c[0].to_string_lossy(),
+            r"C:\Windows\System32\rdpsign.exe"
+        );
+        assert_eq!(
+            c[1].to_string_lossy(),
+            r"C:\Windows\Sysnative\rdpsign.exe"
+        );
+    }
+
+    #[test]
+    fn failure_reason_prefers_stderr_first_line() {
+        let r = sign_failure_reason(Some(1), b"out\n", b"\nUnable to sign file: 0x80070002\n\ndetalhe\n");
+        assert_eq!(r, "Unable to sign file: 0x80070002");
+    }
+
+    #[test]
+    fn failure_reason_falls_back_to_stdout_then_exit_code() {
+        assert_eq!(
+            sign_failure_reason(Some(2), b"aviso qualquer\n", b"\n  \n"),
+            "aviso qualquer"
+        );
+        assert_eq!(
+            sign_failure_reason(Some(3), b"", b""),
+            "codigo de saida 3 sem mensagem"
+        );
+        assert_eq!(
+            sign_failure_reason(None, b"", b""),
+            "sem codigo de saida nem mensagem"
+        );
+    }
+
+    #[test]
+    fn failure_reason_truncates_long_lines() {
+        let long = "x".repeat(200);
+        let r = sign_failure_reason(Some(1), long.as_bytes(), b"");
+        assert_eq!(r.chars().count(), 161);
+        assert!(r.ends_with('…'));
     }
 
     #[cfg(not(windows))]

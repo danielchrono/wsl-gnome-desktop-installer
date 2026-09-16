@@ -338,6 +338,12 @@ pub fn verify_checks(shell_service: &str, rdp_service: &str, rdp_port: u16) -> V
     ]
 }
 
+/// So confere persistencia da assinatura quando assinou de verdade: pular
+/// (binario ausente) ou falhar ja emitiu seu warn — repetir e ruido.
+pub fn should_verify_signature_persisted(outcome: &crate::rdp::SignOutcome) -> bool {
+    *outcome == crate::rdp::SignOutcome::Signed
+}
+
 /// `$r.Out -match $t.Want`: `^x$` = igualdade apos trim; resto = substring.
 pub fn check_output_matches(out: &str, want: &str) -> bool {
     if let Some(inner) = want.strip_prefix('^').and_then(|s| s.strip_suffix('$')) {
@@ -1335,13 +1341,18 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         diag.fail("Arquivo .rdp nao criado".to_string());
         return Err(InstallError::RdpNotCreated);
     }
-    if rdp::sign_rdp_file(&rdp_path, &pub_cert_tp) {
-        let short = pub_cert_tp.get(..8).unwrap_or(pub_cert_tp.as_str());
-        diag.ok(&format!(
-            "RDP assinado (sem aviso de fornecedor) [{short}]"
-        ));
-    } else {
-        diag.warn("Assinatura do .rdp falhou - o aviso de fornecedor pode continuar");
+    let sign_outcome = rdp::sign_rdp_file(&rdp_path, &pub_cert_tp);
+    match &sign_outcome {
+        rdp::SignOutcome::Signed => {
+            let short = pub_cert_tp.get(..8).unwrap_or(pub_cert_tp.as_str());
+            diag.ok(&format!("RDP assinado (sem aviso de fornecedor) [{short}]"));
+        }
+        rdp::SignOutcome::NoBinary => diag.warn(
+            "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)",
+        ),
+        rdp::SignOutcome::Failed(reason) => diag.warn(&format!(
+            "Assinatura do .rdp falhou ({reason}) - o aviso de fornecedor pode continuar"
+        )),
     }
     // Atalho aponta para o .ico so quando ele e valido de verdade: apontar
     // para um arquivo corrompido (que existe) nascia o .lnk sem imagem.
@@ -1367,12 +1378,16 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     }
     // Nada mais toca no .rdp depois da assinatura: se o marcador sumiu aqui,
     // algo reescreveu o arquivo no meio do passo 6 (e o mstsc vai acusar
-    // fornecedor desconhecido mesmo com o "assinado" acima).
-    let still_signed = std::fs::read(&rdp_path)
-        .map(|b| rdp::rdp_has_signature(&b))
-        .unwrap_or(false);
-    if !still_signed {
-        diag.warn("Assinatura sumiu apos gravar atalhos - o aviso de fornecedor pode continuar");
+    // fornecedor desconhecido mesmo com o "assinado" acima). So verifica
+    // quando assinou de verdade — pular/falhar ja avisou acima, repetir e
+    // ruido (foi o duplo warn do log do caiop).
+    if should_verify_signature_persisted(&sign_outcome) {
+        let still_signed = std::fs::read(&rdp_path)
+            .map(|b| rdp::rdp_has_signature(&b))
+            .unwrap_or(false);
+        if !still_signed {
+            diag.warn("Assinatura sumiu apos gravar atalhos - o aviso de fornecedor pode continuar");
+        }
     }
 
     // ---- 7. verificacao ----------------------------------------------------------
@@ -1839,8 +1854,45 @@ mod tests {
     }
 
     #[test]
+    fn exe_icon_rc_points_to_valid_ico() {
+        // O icone do .exe: `assets/ubuntu-gui.rc` (linkado pelo build.rs via
+        // windres) tem que referenciar um .ico valido que existe. Se a linha
+        // quebrar, o build passa (fallback sem icone) mas o Explorer mostra o
+        // icone padrao — este teste acusa antes.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let rc = std::fs::read_to_string(dir.join("ubuntu-gui.rc")).unwrap();
+        let quoted: Vec<&str> = rc
+            .lines()
+            .filter(|l| l.contains("ICON"))
+            .flat_map(|l| {
+                l.split('"')
+                    .enumerate()
+                    .filter(|(i, _)| i % 2 == 1)
+                    .map(|(_, s)| s)
+            })
+            .collect();
+        assert!(!quoted.is_empty(), "rc sem arquivo ICON");
+        for name in quoted {
+            assert!(
+                is_valid_ico_file(&dir.join(name)),
+                "rc referencia .ico invalido: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn icon_sizes_arg_shape() {
         assert_eq!(icon_sizes_arg(&[16, 32]), "(16 ,16),(32 ,32)");
+    }
+
+    #[test]
+    fn signature_persistence_checked_only_when_signed() {
+        use crate::rdp::SignOutcome;
+        assert!(should_verify_signature_persisted(&SignOutcome::Signed));
+        assert!(!should_verify_signature_persisted(&SignOutcome::NoBinary));
+        assert!(!should_verify_signature_persisted(&SignOutcome::Failed(
+            "x".to_string()
+        )));
     }
 
     #[test]

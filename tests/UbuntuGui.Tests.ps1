@@ -75,6 +75,9 @@ Describe 'New-RdpFileContent' {
     ($rdp -contains 'screen mode id:i:1') | Should Be $true
     ($rdp -contains 'usbdevicestoredirect:s:*') | Should Be $true
   }
+  It 'redireciona PnP (Recursos Locais > Mais)' {
+    ($rdp -contains 'devicestoredirect:s:*') | Should Be $true
+  }
   It 'sem blob de senha no arquivo (rdpsign deforma)' {
     ($rdp -join "`n") | Should Not Match 'password 51:b:'
   }

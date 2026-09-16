@@ -11,6 +11,7 @@ function New-RdpFileContent(
   # redimensionar — sem barras pretas horizontais ou verticais.
   $rdp = @('screen mode id:i:1', 'session bpp:i:32', 'smart sizing:i:1', 'dynamic resolution:i:1')  # 1 = janela (2 = tela cheia); maximizar continua possivel; zoom sem scroll
   $rdp += 'usbdevicestoredirect:s:*'  # USB do host na sessao (o servidor/GNOME pode recusar algumas classes)
+  $rdp += 'devicestoredirect:s:*'  # PnP do host (Recursos Locais > Mais; idem acima)
   if ($Resolution -match '^(\d+)x(\d+)$') {
     $rdp += "desktopwidth:i:$($Matches[1])"
     $rdp += "desktopheight:i:$($Matches[2])"

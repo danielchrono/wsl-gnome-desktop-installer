@@ -713,7 +713,15 @@ else { Fail "Arquivo .rdp nao criado"; throw "RDP nao criado" }
 $rdpSign = @("$env:SystemRoot\System32\rdpsign.exe", "$env:SystemRoot\Sysnative\rdpsign.exe") |
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($rdpSign -and (Test-Path $rdpSign)) {
-  & $rdpSign /sha256 $pubCert.Thumbprint "$RdpPath" | Out-Null
+  # Guarda o motivo: o warn abaixo diz PORQUE falhou, nao so "falhou".
+  $signReason = $null
+  $signOut = & $rdpSign /sha256 $pubCert.Thumbprint "$RdpPath" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) {
+    $signReason = ($signOut -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($signReason)) { $signReason = "codigo de saida $LASTEXITCODE sem mensagem" }
+    $signReason = $signReason.Trim()
+    if ($signReason.Length -gt 160) { $signReason = $signReason.Substring(0, 160) + '…' }
+  }
 } else {
   Warn "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)"
 }
@@ -725,6 +733,7 @@ try {
   $rdpSigned = ([Text.Encoding]::UTF8.GetString($rdpBytes) -match 'signature:s:') -or ([Text.Encoding]::Unicode.GetString($rdpBytes) -match 'signature:s:')
 } catch { $rdpSigned = $false }
 if ($rdpSigned) { Ok "RDP assinado (sem aviso de fornecedor) [$($pubCert.Thumbprint.Substring(0,8))]" }
+elseif ($signReason) { Warn "Assinatura do .rdp falhou ($signReason) - o aviso de fornecedor pode continuar" }
 else { Warn "Assinatura do .rdp falhou - o aviso de fornecedor pode continuar" }
 
 # Acesso Controlado a Pastas (Defender) pode bloquear a gravacao no Desktop:

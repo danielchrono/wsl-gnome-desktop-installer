@@ -45,7 +45,7 @@ if ((-not $Unattended) -and (-not $env:UBUNTUGUI_FROM_CMD)) {
   }
 }
 
-$SCRIPT_BUILD = "d68e3803e580"
+$SCRIPT_BUILD = "74ab1d1812e5"
 Write-Host "Ubuntu-GUI Installer v$SCRIPT_VERSION (build $SCRIPT_BUILD)" -ForegroundColor Cyan
 $script:UbuntuGuiBannerShown = $true
 # Fonte unica de tunables tecnicos: mude AQUI, nunca espalhado no fluxo.
@@ -674,6 +674,7 @@ function New-RdpFileContent(
   # redimensionar — sem barras pretas horizontais ou verticais.
   $rdp = @('screen mode id:i:1', 'session bpp:i:32', 'smart sizing:i:1', 'dynamic resolution:i:1')  # 1 = janela (2 = tela cheia); maximizar continua possivel; zoom sem scroll
   $rdp += 'usbdevicestoredirect:s:*'  # USB do host na sessao (o servidor/GNOME pode recusar algumas classes)
+  $rdp += 'devicestoredirect:s:*'  # PnP do host (Recursos Locais > Mais; idem acima)
   if ($Resolution -match '^(\d+)x(\d+)$') {
     $rdp += "desktopwidth:i:$($Matches[1])"
     $rdp += "desktopheight:i:$($Matches[2])"
@@ -1556,7 +1557,15 @@ else { Fail "Arquivo .rdp nao criado"; throw "RDP nao criado" }
 $rdpSign = @("$env:SystemRoot\System32\rdpsign.exe", "$env:SystemRoot\Sysnative\rdpsign.exe") |
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($rdpSign -and (Test-Path $rdpSign)) {
-  & $rdpSign /sha256 $pubCert.Thumbprint "$RdpPath" | Out-Null
+  # Guarda o motivo: o warn abaixo diz PORQUE falhou, nao so "falhou".
+  $signReason = $null
+  $signOut = & $rdpSign /sha256 $pubCert.Thumbprint "$RdpPath" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) {
+    $signReason = ($signOut -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($signReason)) { $signReason = "codigo de saida $LASTEXITCODE sem mensagem" }
+    $signReason = $signReason.Trim()
+    if ($signReason.Length -gt 160) { $signReason = $signReason.Substring(0, 160) + '…' }
+  }
 } else {
   Warn "rdpsign.exe ausente - pulando assinatura (o .rdp funciona, so mostra aviso de fornecedor)"
 }
@@ -1568,6 +1577,7 @@ try {
   $rdpSigned = ([Text.Encoding]::UTF8.GetString($rdpBytes) -match 'signature:s:') -or ([Text.Encoding]::Unicode.GetString($rdpBytes) -match 'signature:s:')
 } catch { $rdpSigned = $false }
 if ($rdpSigned) { Ok "RDP assinado (sem aviso de fornecedor) [$($pubCert.Thumbprint.Substring(0,8))]" }
+elseif ($signReason) { Warn "Assinatura do .rdp falhou ($signReason) - o aviso de fornecedor pode continuar" }
 else { Warn "Assinatura do .rdp falhou - o aviso de fornecedor pode continuar" }
 
 # Acesso Controlado a Pastas (Defender) pode bloquear a gravacao no Desktop:

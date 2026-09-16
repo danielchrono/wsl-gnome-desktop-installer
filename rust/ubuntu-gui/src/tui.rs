@@ -237,6 +237,31 @@ pub fn read_secure_password(prompt: &str, no_tui: bool) -> SecureStr {
     }
 }
 
+/// Predicado puro da trava de saida: segura o console so com terminal
+/// interativo e fora do `--unattended` (automacao/pipe nunca pode travar).
+pub fn should_hold_console(unattended: bool, stdin_interactive: bool) -> bool {
+    !unattended && stdin_interactive
+}
+
+/// Trava "pressione qualquer tecla" (paridade com o `pause` do `.cmd`):
+/// sem ela a janela fecha sozinha e o log voa junto. Qualquer tecla solta
+/// (nao so Enter); erro de leitura nunca trava — solta em vez de enforcar.
+pub fn hold_console() {
+    use crossterm::event::{read, Event, KeyEventKind};
+    use std::io::Write;
+
+    print!("Pressione qualquer tecla para sair... ");
+    let _ = std::io::stdout().flush();
+    loop {
+        match read() {
+            Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => break,
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    println!();
+}
+
 fn interactive_password(prompt: &str) -> Option<SecureStr> {
     use crossterm::event::{read, Event, KeyCode, KeyEventKind};
 
@@ -329,6 +354,14 @@ mod tests {
     fn redraw_top_clamps_at_zero() {
         assert_eq!(menu_redraw_top(3, 5), 0);
         assert_eq!(menu_redraw_top(0, 5), 0);
+    }
+
+    #[test]
+    fn hold_console_only_when_interactive_and_attended() {
+        assert!(should_hold_console(false, true));
+        assert!(!should_hold_console(true, true));
+        assert!(!should_hold_console(false, false));
+        assert!(!should_hold_console(true, false));
     }
 
     #[test]
