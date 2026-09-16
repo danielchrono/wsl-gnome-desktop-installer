@@ -214,7 +214,9 @@ mod tests {
 
     #[test]
     fn writes_file_to_disk() {
-        let dir = std::env::temp_dir().join(format!("ubuntu-gui-lnk-{}", std::process::id()));
+        // Nome unico por teste: dividir o diretorio com outro teste no mesmo
+        // processo causava falha intermitente (um apagava o arquivo do outro).
+        let dir = std::env::temp_dir().join(format!("ubuntu-gui-lnk-writes-{}", std::process::id()));
         let lnk = dir.join("Ubuntu-GUI.lnk");
         write_lnk_file(&lnk, &sample()).unwrap();
         let back = std::fs::read(&lnk).unwrap();

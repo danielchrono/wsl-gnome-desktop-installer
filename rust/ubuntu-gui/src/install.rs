@@ -8,6 +8,17 @@ use crate::error::InstallError;
 
 /// Nome do icone (`$ICON_FILE`).
 pub const ICON_FILE: &str = "ubuntu.ico";
+
+/// Icone oficial embutido no binario (gerado de `icon_url` via `/tmp/make_ico.py`,
+/// mesmo pad quadrado + multi-size do `icon_build_command`): fresh install sem
+/// rede continua com o logo; o download legado vira fallback.
+const EMBEDDED_UBUNTU_ICO: &[u8] = include_bytes!("../assets/ubuntu.ico");
+
+/// Grava o icone embutido e valida (`is_valid_ico_file`): `true` = logo
+/// oficial no disco (sem rede, sem convidado); `false` = segue pro download.
+pub fn write_embedded_icon(path: &std::path::Path) -> bool {
+    std::fs::write(path, EMBEDDED_UBUNTU_ICO).is_ok() && is_valid_ico_file(path)
+}
 /// Codinome do Ubuntu alvo, informativo (`$UBUNTU_CODENAME`, 26.04 LTS).
 pub const UBUNTU_CODENAME: &str = "resolute";
 /// Nome do log de transcript (`$LogFile` em TEMP).
@@ -949,33 +960,6 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
         diag.ok("Bloco WSLg ja estava no .bashrc");
     }
 
-    // S6 antecipado (2/2): baixar+converter o icone so precisa de rede e do
-    // PIL — que o S3 ACABOU de instalar (sobrepor ao apt quebraria fresh
-    // install: sem PIL a conversao falha). Corre SOBREPOSTO a S4 (restart +
-    // sleeps) e S5 (cofre: timeouts longos). `invoke_wsl` e capturado, entao
-    // nada vaza no console; validacao + emissao so no join (S6).
-    let icons_dir =
-        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Icons");
-    let _ = std::fs::create_dir_all(&icons_dir);
-    let ico_path = icons_dir.join(ICON_FILE);
-    let icon_handle: Option<std::thread::JoinHandle<String>> = if !is_valid_ico_file(&ico_path) {
-        let _ = std::fs::remove_file(&ico_path);
-        let icon_cmd = icon_build_command(
-            &d.icon_url,
-            &windows_path_to_wsl(&ico_path.to_string_lossy()),
-            &icon_sizes_arg(&d.icon_sizes),
-        );
-        let icon_distro = distro.clone();
-        let icon_user = linux_user.clone();
-        Some(std::thread::spawn(move || {
-            wsl_cmd::invoke_wsl(Some(&icon_distro), &icon_user, &icon_cmd)
-                .map(|r| r.out)
-                .unwrap_or_default()
-        }))
-    } else {
-        None
-    };
-
     // ---- 4. shell headless -----------------------------------------------------
     diag.begin_step(
         "S4_BEGIN",
@@ -1223,19 +1207,33 @@ pub fn run_install(opts: &InstallOptions) -> Result<InstallOutcome, InstallError
     // ---- 6. icone + atalhos ----------------------------------------------------------
     diag.begin_step("S6_BEGIN", 6, &format!("Icone e atalhos ({app_name})"));
     let _ = std::fs::create_dir_all(&prog_dir);
-    // Joins do trabalho sobreposto (S3-S5): mesma ordem de emissao do
-    // sequencial. Icone: erro vira warn+fallback (fail-open: o mstsc cobre);
-    // a essa altura o wsl ja rodou dezenas de vezes, entao falha de spawn e
-    // impossivel na pratica. Cert: erro continua fatal como o `?` original.
-    match icon_handle.map(|h| h.join().unwrap_or_default()) {
-        Some(out) => {
-            if is_valid_ico_file(&ico_path) {
-                diag.ok("Icone Ubuntu baixado e convertido");
-            } else {
-                diag.warn(&format!("Icone oficial falhou, usando o do mstsc ({out})"));
-            }
+    // Icone: embutido primeiro (instantaneo, sem rede nem convidado); download
+    // legado so se o embutido falhar. Fail-open com fallback no mstsc: a essa
+    // altura o wsl ja rodou dezenas de vezes, entao falha de spawn do
+    // fallback e impossivel na pratica. Join do cert mantem a ordem do log.
+    let icons_dir =
+        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Icons");
+    let _ = std::fs::create_dir_all(&icons_dir);
+    let ico_path = icons_dir.join(ICON_FILE);
+    if is_valid_ico_file(&ico_path) {
+        diag.ok("Icone ja existia");
+    } else if write_embedded_icon(&ico_path) {
+        diag.ok("Icone Ubuntu embutido no instalador");
+    } else {
+        let w_ico = windows_path_to_wsl(&ico_path.to_string_lossy());
+        let sizes = icon_sizes_arg(&d.icon_sizes);
+        let out = wsl_cmd::invoke_wsl(
+            Some(&distro),
+            &linux_user,
+            &icon_build_command(&d.icon_url, &w_ico, &sizes),
+        )
+        .map(|r| r.out)
+        .unwrap_or_default();
+        if is_valid_ico_file(&ico_path) {
+            diag.ok("Icone Ubuntu baixado e convertido");
+        } else {
+            diag.warn(&format!("Icone oficial falhou, usando o do mstsc ({out})"));
         }
-        None => diag.ok("Icone ja existia"),
     }
     let (pub_cert_tp, pub_trust) = match pub_cert_handle.join() {
         Ok(Ok(v)) => v,
@@ -1824,6 +1822,23 @@ mod tests {
     }
 
     #[test]
+    fn embedded_icon_writes_valid_ico() {
+        // O asset embutido tem que ser .ico valido em todo build: se alguem
+        // trocar o arquivo e quebrar o formato, o S6 cairia no download.
+        // (Nome unico por teste: dois testes no mesmo processo nao dividem o
+        // diretorio — vide o flake dos testes de .lnk.)
+        let dir =
+            std::env::temp_dir().join(format!("ubuntu-gui-ico-embedded-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ubuntu.ico");
+        assert!(write_embedded_icon(&path), "embutido nao gravou/validou");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..6], &[0x00, 0x00, 0x01, 0x00, 0x05, 0x00]);
+        assert!(is_valid_ico_bytes(&bytes));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn icon_sizes_arg_shape() {
         assert_eq!(icon_sizes_arg(&[16, 32]), "(16 ,16),(32 ,32)");
     }
@@ -1915,7 +1930,8 @@ mod tests {
 
     #[test]
     fn shortcut_file_builds_valid_lnk() {
-        let dir = std::env::temp_dir().join(format!("ubuntu-gui-lnk-{}", std::process::id()));
+        // Nome unico por teste (vide `writes_file_to_disk`): sem divisao.
+        let dir = std::env::temp_dir().join(format!("ubuntu-gui-lnk-build-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         // mslnk exige que o target exista; criamos um .cmd temporario real.
         let target_cmd = dir.join("Ubuntu-GUI.cmd");
